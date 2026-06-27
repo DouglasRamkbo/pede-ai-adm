@@ -1,0 +1,1671 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Cache busting: evita usuário ficar preso em versão antiga após deploy -->
+    <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <!--
+        Content Security Policy: trava XSS e supply-chain dos CDNs.
+        Allowlist enxuta — só as origens realmente usadas pelo painel.
+        'unsafe-inline' está presente porque Tailwind injeta CSS inline e há scripts inline (módulos ES6 + handlers onclick).
+        Em produção endurecida: trocar Tailwind CDN por build local e usar nonces nos scripts.
+        wss://localhost para o QZ Tray; ws://localhost mantido como fallback (algumas instalações antigas).
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.gstatic.com;
+        style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;
+        font-src 'self' data: https://cdnjs.cloudflare.com;
+        img-src 'self' data: https: blob:;
+        media-src 'self' https://cdn.freesound.org;
+        connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebasedatabase.app https://firestore.googleapis.com wss://*.firebaseio.com wss://localhost:* ws://localhost:* https://localhost:* http://localhost:*;
+        frame-src 'none';
+        object-src 'none';
+        base-uri 'self';
+        form-action 'self';
+    ">
+    <link rel="icon" id="faviconEl" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23FFD700'/%3E%3Ctext x='50%25' y='55%25' text-anchor='middle' font-size='40' font-weight='900' fill='%230a0a0a' font-family='Arial'%3EB%3C/text%3E%3C/svg%3E">
+    <title>Painel Brava | Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- QZ Tray: ponte com a impressora térmica via ESC/POS (sem driver do navegador) -->
+    <script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.4/qz-tray.js"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { colors: { brava: { yellow: '#FFD700', black: '#111111' } } } }
+        }
+    </script>
+    <style>
+        /* Tema dinâmico: cor primária controlada por variável CSS, alterável em runtime */
+        :root { --brand-primary: #FFD700; --brand-on-primary: #0a0a0a; }
+        .bg-brava-yellow { background-color: var(--brand-primary) !important; }
+        .text-brava-yellow { color: var(--brand-primary) !important; }
+        .border-brava-yellow { border-color: var(--brand-primary) !important; }
+        .focus\:border-brava-yellow:focus { border-color: var(--brand-primary) !important; }
+        .hover\:bg-brava-yellow:hover { background-color: var(--brand-primary) !important; }
+
+        @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-pulse-once { animation: toastIn 0.25s ease-out; }
+
+        /* Impressão 58mm - TUDO EM NEGRITO */
+        @media print {
+            @page { margin: 0; size: 58mm auto; }
+            html, body { margin: 0 !important; padding: 0 !important; width: 58mm !important; background-color: #fff !important; }
+            body > *:not(#printableArea) { display: none !important; }
+            #printableArea { 
+                display: block !important; 
+                position: relative !important; 
+                width: 100% !important; 
+                margin: 0 !important; 
+                padding: 5px !important; 
+                font-family: 'Courier New', Courier, monospace !important; 
+                font-size: 13px !important; 
+                color: #000 !important; 
+                background: white !important; 
+                font-weight: 900 !important;
+            }
+            #printableArea * { font-weight: 900 !important; color: #000 !important; }
+            .print-line { border-top: 2px dashed #000; margin: 4px 0; display: block; width: 100%; }
+            .print-header { text-align: center; font-size: 16px; margin-bottom: 2px; text-transform: uppercase; }
+            .print-subheader { text-align: center; font-size: 11px; margin-bottom: 5px; }
+            .print-row { display: flex !important; justify-content: space-between !important; width: 100% !important; }
+            .print-center { text-align: center; }
+            .print-section { margin: 6px 0; }
+            * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+
+    <!-- Toasts -->
+    <div id="toastContainer" class="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 items-end pointer-events-none"></div>
+
+    <audio id="notificationSound" loop>
+        <source src="https://cdn.freesound.org/previews/316/316847_4939433-lq.mp3" type="audio/mpeg">
+    </audio>
+
+    <div id="printableArea" class="hidden"></div>
+
+    <!-- TELA DE LOGIN -->
+    <div id="loginScreen" class="fixed inset-0 bg-brava-black flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm text-center">
+            <div class="w-16 h-16 bg-brava-yellow rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">👑</div>
+            <h2 class="text-2xl font-bold mb-6 text-gray-800">Área do Dono</h2>
+            <input type="email" id="adminEmail" autocomplete="username" class="w-full border-2 border-gray-200 rounded-lg p-3 mb-3 text-center text-lg outline-none focus:border-brava-yellow" placeholder="E-mail">
+            <input type="password" id="adminPass" autocomplete="current-password" class="w-full border-2 border-gray-200 rounded-lg p-3 mb-4 text-center text-lg outline-none focus:border-brava-yellow" placeholder="Senha" onkeydown="if(event.key==='Enter') attemptLogin()">
+            <button onclick="attemptLogin()" id="btnLogin" class="w-full bg-brava-black text-brava-yellow font-bold py-3 rounded-lg hover:opacity-90">ENTRAR</button>
+            <p id="loginError" class="text-red-500 text-sm mt-3 hidden"></p>
+        </div>
+    </div>
+
+    <!-- AVISO DE CONEXÃO -->
+    <div id="connectionAlert" class="hidden fixed top-0 left-0 right-0 bg-red-600 text-white text-center p-3 z-[60] font-bold text-sm shadow-md animate-pulse">
+        <i class="fas fa-wifi-slash mr-2"></i> Erro: Sem conexão com o Banco de Dados! Verifique sua internet.
+    </div>
+
+    <!-- PAINEL PRINCIPAL -->
+    <div id="dashboard" class="hidden min-h-screen flex flex-col md:flex-row">
+        
+        <!-- Sidebar -->
+        <aside class="bg-brava-black text-white w-full md:w-64 flex-shrink-0 md:h-screen md:sticky md:top-0 overflow-y-auto z-40">
+            <div id="sidebarBrand" class="p-6 bg-brava-yellow text-brava-black font-black text-xl text-center">BRAVA ADMIN</div>
+            <nav class="p-4 space-y-2">
+                <button onclick="showTab('orders')" class="w-full text-left p-3 rounded hover:bg-gray-800 flex items-center gap-3 bg-gray-800 text-brava-yellow font-bold" id="nav-orders">
+                    <i class="fas fa-bell"></i> Pedidos <span id="pendingCount" class="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full ml-auto hidden animate-bounce">0</span>
+                </button>
+                <button onclick="showTab('reports')" class="w-full text-left p-3 rounded hover:bg-gray-800 flex items-center gap-3" id="nav-reports">
+                    <i class="fas fa-chart-pie"></i> Relatórios
+                </button>
+                <button onclick="showTab('products')" class="w-full text-left p-3 rounded hover:bg-gray-800 flex items-center gap-3" id="nav-products">
+                    <i class="fas fa-box"></i> Produtos
+                </button>
+                <button onclick="showTab('categories')" class="w-full text-left p-3 rounded hover:bg-gray-800 flex items-center gap-3" id="nav-categories">
+                    <i class="fas fa-tags"></i> Categorias
+                </button>
+                <button onclick="showTab('settings')" class="w-full text-left p-3 rounded hover:bg-gray-800 flex items-center gap-3" id="nav-settings">
+                    <i class="fas fa-cog"></i> Configurações
+                </button>
+            </nav>
+            <div class="p-4 mt-auto border-t border-gray-800 space-y-3">
+                <button onclick="toggleSound()" id="soundBtn" class="text-xs text-gray-400 flex items-center gap-2 hover:text-white">
+                    <i class="fas fa-volume-up"></i> Som Ativado
+                </button>
+                <button onclick="logout()" class="text-xs text-gray-400 flex items-center gap-2 hover:text-red-400">
+                    <i class="fas fa-sign-out-alt"></i> Sair
+                </button>
+            </div>
+        </aside>
+
+        <!-- Conteúdo -->
+        <main class="flex-1 p-4 md:p-6 bg-gray-100">
+            
+            <!-- TAB: PEDIDOS -->
+            <div id="tab-orders" class="space-y-6 pb-20">
+                <div class="flex justify-between items-center border-b pb-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Pedidos de Hoje</h2>
+                        <p id="currentDateDisplay" class="text-xs text-gray-500 font-bold uppercase"></p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div id="dbStatusBadge" class="flex items-center gap-2 px-3 py-1 rounded-full bg-green-100 text-green-700 font-bold text-sm border border-green-200">
+                            <span id="dbStatusDot" class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                            <span id="dbStatusText">Online</span>
+                        </div>
+                        <div id="qzStatusBadge" title="Impressora térmica" class="flex items-center gap-2 px-3 py-1 rounded-full bg-gray-100 text-gray-600 font-bold text-sm border border-gray-200">
+                            <i class="fas fa-print text-[10px]"></i>
+                            <span id="qzStatusText">Off</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex gap-2 overflow-x-auto pb-2">
+                    <div class="flex items-center gap-1 bg-red-100 text-red-600 px-2 py-1 rounded text-[10px] font-bold uppercase">Novo</div>
+                    <div class="flex items-center gap-1 bg-yellow-100 text-yellow-700 px-2 py-1 rounded text-[10px] font-bold uppercase">Preparo</div>
+                    <div class="flex items-center gap-1 bg-blue-100 text-blue-700 px-2 py-1 rounded text-[10px] font-bold uppercase">Entrega</div>
+                    <div class="flex items-center gap-1 bg-green-100 text-green-700 px-2 py-1 rounded text-[10px] font-bold uppercase">Concluído</div>
+                </div>
+
+                <div class="space-y-4">
+                    <div class="flex items-center gap-2 text-red-600 font-black text-xs uppercase tracking-widest">
+                        <span class="w-2 h-2 bg-red-600 rounded-full"></span> Em Andamento
+                    </div>
+                    <div id="ordersListActive" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <div class="col-span-full text-center py-10 text-gray-400">Aguardando pedidos...</div>
+                    </div>
+                </div>
+
+                <div class="pt-10 space-y-4">
+                    <div class="flex items-center gap-2 text-gray-500 font-black text-xs uppercase tracking-widest">
+                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span> Finalizados Hoje
+                    </div>
+                    <div id="ordersListHistory" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 opacity-75">
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB: RELATÓRIOS -->
+            <div id="tab-reports" class="hidden space-y-6 pb-20">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b pb-4 gap-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Relatórios Financeiros</h2>
+                        <p id="statPeriodLabel" class="text-xs text-gray-400 font-bold uppercase mt-0.5">Este Mês</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 items-center bg-white p-2 rounded-xl shadow-sm border border-gray-200">
+                        <select id="reportFilterType" onchange="toggleReportInputs()" class="border p-1.5 rounded-lg text-sm bg-gray-50 outline-none font-bold text-gray-700">
+                            <option value="today">Hoje</option>
+                            <option value="yesterday">Ontem</option>
+                            <option value="this_month" selected>Este Mês</option>
+                            <option value="last_month">Mês Passado</option>
+                            <option value="custom_date">Dia Específico</option>
+                        </select>
+                        <input type="date" id="reportFilterDate" class="hidden border p-1.5 rounded-lg text-sm">
+                        <button onclick="applyReportFilter()" class="bg-brava-black text-brava-yellow px-5 py-1.5 rounded-lg text-sm font-black tracking-wide hover:opacity-90 transition">
+                            <i class="fas fa-filter mr-1"></i> Filtrar
+                        </button>
+                    </div>
+                </div>
+
+                <!-- KPI Cards -->
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+                    <div class="bg-gradient-to-br from-blue-600 to-blue-700 p-5 rounded-2xl shadow-md text-white relative overflow-hidden">
+                        <div class="absolute right-0 top-0 w-24 h-24 bg-white opacity-5 rounded-full -mr-6 -mt-6"></div>
+                        <div class="flex items-center gap-2 mb-3">
+                            <div class="w-8 h-8 bg-white bg-opacity-20 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-dollar-sign text-sm"></i>
+                            </div>
+                            <p class="text-xs font-bold uppercase opacity-80">Faturamento</p>
+                        </div>
+                        <h3 class="text-2xl font-black" id="statRevenue">R$ 0,00</h3>
+                        <p class="text-[10px] opacity-60 mt-1 uppercase tracking-widest">Período selecionado</p>
+                    </div>
+                    <div class="bg-gradient-to-br from-emerald-500 to-emerald-600 p-5 rounded-2xl shadow-md text-white relative overflow-hidden">
+                        <div class="absolute right-0 top-0 w-24 h-24 bg-white opacity-5 rounded-full -mr-6 -mt-6"></div>
+                        <div class="flex items-center gap-2 mb-3">
+                            <div class="w-8 h-8 bg-white bg-opacity-20 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-shopping-bag text-sm"></i>
+                            </div>
+                            <p class="text-xs font-bold uppercase opacity-80">Pedidos</p>
+                        </div>
+                        <h3 class="text-2xl font-black" id="statOrdersCount">0</h3>
+                        <p class="text-[10px] opacity-60 mt-1 uppercase tracking-widest">Total concluídos</p>
+                    </div>
+                    <div class="bg-gradient-to-br from-violet-500 to-violet-700 p-5 rounded-2xl shadow-md text-white relative overflow-hidden">
+                        <div class="absolute right-0 top-0 w-24 h-24 bg-white opacity-5 rounded-full -mr-6 -mt-6"></div>
+                        <div class="flex items-center gap-2 mb-3">
+                            <div class="w-8 h-8 bg-white bg-opacity-20 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-receipt text-sm"></i>
+                            </div>
+                            <p class="text-xs font-bold uppercase opacity-80">Ticket Médio</p>
+                        </div>
+                        <h3 class="text-2xl font-black" id="statTicket">R$ 0,00</h3>
+                        <p class="text-[10px] opacity-60 mt-1 uppercase tracking-widest">Por pedido</p>
+                    </div>
+                    <div class="bg-gradient-to-br from-orange-500 to-orange-600 p-5 rounded-2xl shadow-md text-white relative overflow-hidden">
+                        <div class="absolute right-0 top-0 w-24 h-24 bg-white opacity-5 rounded-full -mr-6 -mt-6"></div>
+                        <div class="flex items-center gap-2 mb-3">
+                            <div class="w-8 h-8 bg-white bg-opacity-20 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-motorcycle text-sm"></i>
+                            </div>
+                            <p class="text-xs font-bold uppercase opacity-80">Taxas (Motoboy)</p>
+                        </div>
+                        <h3 class="text-2xl font-black" id="statFees">R$ 0,00</h3>
+                        <p class="text-[10px] opacity-60 mt-1 uppercase tracking-widest">Total de taxas</p>
+                    </div>
+                    <div class="bg-gradient-to-br from-red-500 to-red-600 p-5 rounded-2xl shadow-md text-white relative overflow-hidden">
+                        <div class="absolute right-0 top-0 w-24 h-24 bg-white opacity-5 rounded-full -mr-6 -mt-6"></div>
+                        <div class="flex items-center gap-2 mb-3">
+                            <div class="w-8 h-8 bg-white bg-opacity-20 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-ban text-sm"></i>
+                            </div>
+                            <p class="text-xs font-bold uppercase opacity-80">Cancelados</p>
+                        </div>
+                        <h3 class="text-2xl font-black" id="statCanceled">0</h3>
+                        <p class="text-[10px] opacity-60 mt-1 uppercase tracking-widest" id="statCanceledValue">R$ 0,00 perdidos</p>
+                    </div>
+                </div>
+
+                <!-- Gráficos -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <!-- Gráfico de linha: pedidos por hora -->
+                    <div class="md:col-span-2 bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                        <div class="flex justify-between items-center mb-4">
+                            <div>
+                                <h4 class="font-black text-gray-800 text-sm uppercase tracking-wide">Pedidos por Hora</h4>
+                                <p class="text-[10px] text-gray-400 font-bold uppercase">Volume ao longo do dia</p>
+                            </div>
+                            <span class="bg-blue-50 text-blue-600 text-[10px] font-black px-2 py-1 rounded-full uppercase">Timeline</span>
+                        </div>
+                        <div class="h-56"><canvas id="chartTime"></canvas></div>
+                    </div>
+                    <!-- Gráfico de pizza: formas de pagamento -->
+                    <div class="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                        <div class="flex justify-between items-center mb-4">
+                            <div>
+                                <h4 class="font-black text-gray-800 text-sm uppercase tracking-wide">Pagamentos</h4>
+                                <p class="text-[10px] text-gray-400 font-bold uppercase">Por forma</p>
+                            </div>
+                            <span class="bg-violet-50 text-violet-600 text-[10px] font-black px-2 py-1 rounded-full uppercase">Pizza</span>
+                        </div>
+                        <div class="h-56"><canvas id="chartPayment"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Gráfico de barras: top produtos -->
+                <div class="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                    <div class="flex justify-between items-center mb-4">
+                        <div>
+                            <h4 class="font-black text-gray-800 text-sm uppercase tracking-wide">Top Produtos Vendidos</h4>
+                            <p class="text-[10px] text-gray-400 font-bold uppercase">Ranking por quantidade</p>
+                        </div>
+                        <span class="bg-yellow-50 text-yellow-700 text-[10px] font-black px-2 py-1 rounded-full uppercase">Top 8</span>
+                    </div>
+                    <div class="h-64"><canvas id="chartProducts"></canvas></div>
+                </div>
+
+                <!-- Tabela de Entregas -->
+                <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                    <div class="px-5 py-4 border-b border-gray-100 flex flex-col sm:flex-row gap-3 justify-between items-start sm:items-center">
+                        <div>
+                            <h3 class="font-black text-gray-800 text-sm uppercase tracking-wide">Extrato de Entregas</h3>
+                            <p class="text-[10px] text-gray-400 font-bold uppercase">Período selecionado</p>
+                        </div>
+                        <div class="flex items-center gap-2 w-full sm:w-auto">
+                            <div class="relative flex-1 sm:flex-none">
+                                <i class="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300 text-xs"></i>
+                                <input type="text" id="deliverySearch" oninput="filterDeliveryTable()" placeholder="Buscar cliente ou bairro..." aria-label="Buscar na tabela de entregas" class="pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs w-full sm:w-52 outline-none focus:border-blue-400">
+                            </div>
+                            <span id="deliveryCount" class="bg-gray-100 text-gray-600 text-xs font-black px-3 py-1.5 rounded-lg whitespace-nowrap">0 pedidos</span>
+                            <button onclick="exportDeliveryCSV()" aria-label="Exportar CSV" title="Exportar CSV" class="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-green-700 transition">
+                                <i class="fas fa-download"></i> CSV
+                            </button>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto max-h-72">
+                        <table class="w-full text-left border-collapse">
+                            <thead class="sticky top-0 bg-gray-50">
+                                <tr class="text-[10px] text-gray-500 uppercase font-black tracking-widest">
+                                    <th class="px-4 py-3">Data/Hora</th>
+                                    <th class="px-4 py-3">Cliente</th>
+                                    <th class="px-4 py-3">Bairro</th>
+                                    <th class="px-4 py-3">Pagamento</th>
+                                    <th class="px-4 py-3 text-right">Taxa</th>
+                                    <th class="px-4 py-3 text-right">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody id="deliveryTableBody" class="text-sm divide-y divide-gray-50">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB: PRODUTOS -->
+            <div id="tab-products" class="hidden space-y-6 pb-20">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-gray-800">Produtos</h2>
+                    <div class="flex gap-2">
+                         <button onclick="openBulkModal()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm">Importar CSV</button>
+                         <button onclick="openProductModal()" class="bg-green-600 text-white px-4 py-2 rounded-lg font-bold text-sm">+ Novo Produto</button>
+                    </div>
+                </div>
+                <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200 flex flex-col md:flex-row gap-4 items-center">
+                    <div class="relative flex-1 w-full">
+                        <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                        <input type="text" id="productSearch" oninput="filterProducts()" placeholder="Pesquisar produto..." class="w-full pl-10 pr-4 py-2 border-2 border-gray-100 rounded-lg focus:border-brava-yellow outline-none">
+                    </div>
+                    <select id="categoryFilter" onchange="filterProducts()" class="w-full md:w-56 p-2 border-2 border-gray-100 rounded-lg bg-white font-bold text-gray-600">
+                        <option value="all">Todas</option>
+                    </select>
+                    <div id="productCounter" class="text-xs font-bold text-gray-400 uppercase tracking-widest whitespace-nowrap">Carregando...</div>
+                </div>
+                <div id="productsListAdmin" class="bg-white rounded-lg shadow overflow-hidden divide-y mt-4"></div>
+            </div>
+
+            <!-- TAB: CATEGORIAS -->
+            <div id="tab-categories" class="hidden space-y-6 pb-20">
+                <h2 class="text-2xl font-bold text-gray-800">Categorias</h2>
+                <div class="bg-white p-4 rounded-lg shadow flex gap-2">
+                    <input type="text" id="newCatName" placeholder="Nova Categoria" class="flex-1 border rounded p-2">
+                    <button onclick="addCategory()" class="bg-green-600 text-white px-4 py-2 rounded font-bold">Adicionar</button>
+                </div>
+                <div id="categoriesListAdmin" class="space-y-2 mt-4"></div>
+            </div>
+
+            <!-- TAB: CONFIGURAÇÕES -->
+            <div id="tab-settings" class="hidden space-y-6 pb-20">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-gray-800">Configurações</h2>
+                    <div id="adminUserBadge" class="text-xs text-gray-400 font-bold flex items-center gap-1">
+                        <i class="fas fa-user-shield"></i> <span id="adminUserEmail">carregando...</span>
+                    </div>
+                </div>
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3 text-xs text-blue-800">
+                    <i class="fas fa-users mt-0.5 shrink-0"></i>
+                    <span><strong>Controle de acesso:</strong> múltiplos admins podem ser cadastrados no <a href="https://console.firebase.google.com/" target="_blank" class="underline font-bold">Firebase Authentication Console</a>. Todos os usuários autenticados têm acesso total — para permissões diferenciadas (gerente vs. dono), configure <strong>Custom Claims</strong> via Firebase Admin SDK.</span>
+                </div>
+
+                <div class="bg-white p-6 rounded-lg shadow space-y-3">
+                    <h3 class="font-bold border-b pb-2 flex items-center gap-2">
+                        <i class="fas fa-store text-gray-600"></i> Dados da Empresa
+                    </h3>
+                    <p class="text-xs text-gray-500">Aparecem no topo e rodapé do ticket impresso.</p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Nome da loja *</label>
+                            <input type="text" id="shopName" class="border p-2 w-full rounded text-sm" placeholder="Ex: BRAVA CONVENIENCIA" maxlength="48">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Endereço</label>
+                            <input type="text" id="shopAddress" class="border p-2 w-full rounded text-sm" placeholder="Ex: AVENIDA ATLÂNTICA 3480" maxlength="80">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Cidade de entrega *</label>
+                            <input type="text" id="shopCity" class="border p-2 w-full rounded text-sm" placeholder="Ex: Balneário Camboriú" maxlength="60">
+                            <p class="text-[10px] text-gray-400 mt-1">Usada para validar o CEP do cliente na ementa digital.</p>
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Telefone (opcional)</label>
+                            <input type="text" id="shopPhone" class="border p-2 w-full rounded text-sm" placeholder="Ex: 47 99999-9999" maxlength="30">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">WhatsApp p/ pedidos *</label>
+                            <input type="text" id="shopWhatsapp" class="border p-2 w-full rounded text-sm" placeholder="Ex: 5547999999999 (com DDI 55)" maxlength="20">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">CNPJ (opcional)</label>
+                            <input type="text" id="shopCnpj" class="border p-2 w-full rounded text-sm" placeholder="Ex: 00.000.000/0001-00" maxlength="20">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Subtítulo do site (opcional)</label>
+                            <input type="text" id="shopTagline" class="border p-2 w-full rounded text-sm" placeholder="Ex: Entrega Rápida" maxlength="40">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="text-xs font-bold text-gray-500">Mensagem do rodapé</label>
+                            <input type="text" id="shopFooter" class="border p-2 w-full rounded text-sm" placeholder="Ex: Obrigado pela preferência!" maxlength="60">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">URL da logo (opcional)</label>
+                            <input type="url" id="shopLogo" class="border p-2 w-full rounded text-sm" placeholder="https://...">
+                            <p class="text-[10px] text-gray-400 mt-1">Aparece no topo do site do cliente e como favicon.</p>
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Cor primária</label>
+                            <div class="flex gap-2 items-center">
+                                <input type="color" id="shopColor" class="border rounded h-10 w-16 cursor-pointer" value="#FFD700">
+                                <input type="text" id="shopColorHex" class="border p-2 flex-1 rounded text-sm font-mono" placeholder="#FFD700" maxlength="7">
+                            </div>
+                        </div>
+                    </div>
+                    <button onclick="saveShopInfo()" class="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm">
+                        <i class="fas fa-save mr-1"></i> Salvar Dados da Empresa
+                    </button>
+                </div>
+
+                <div class="bg-white p-6 rounded-lg shadow space-y-4">
+                    <h3 class="font-bold border-b pb-2">Horário de Funcionamento</h3>
+                    <div class="flex gap-4 items-end flex-wrap">
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Abre</label>
+                            <div class="flex gap-1 items-center">
+                                <input type="number" id="admOpen" min="0" max="23" class="border p-2 w-16 rounded text-center" placeholder="h">
+                                <span class="font-bold text-gray-400">:</span>
+                                <input type="number" id="admOpenMin" min="0" max="59" class="border p-2 w-16 rounded text-center" placeholder="min">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-gray-500">Fecha</label>
+                            <div class="flex gap-1 items-center">
+                                <input type="number" id="admClose" min="0" max="23" class="border p-2 w-16 rounded text-center" placeholder="h">
+                                <span class="font-bold text-gray-400">:</span>
+                                <input type="number" id="admCloseMin" min="0" max="59" class="border p-2 w-16 rounded text-center" placeholder="min">
+                            </div>
+                        </div>
+                    </div>
+                    <button onclick="saveSettings()" class="bg-blue-600 text-white px-4 py-2 rounded font-bold">Salvar Horários</button>
+                </div>
+
+                <div class="bg-white p-6 rounded-lg shadow space-y-3">
+                    <h3 class="font-bold border-b pb-2 flex items-center gap-2">
+                        <i class="fas fa-print text-gray-600"></i> Impressora Térmica (ESC/POS)
+                    </h3>
+                    <p class="text-xs text-gray-500">
+                        Impressão direta via QZ Tray — sem driver, sem papel longo.
+                        <a href="https://qz.io/download/" target="_blank" class="text-blue-600 underline">Baixar QZ Tray</a>
+                        se ainda não instalou. Depois, clique em "Detectar" pra listar as impressoras desta máquina.
+                    </p>
+                    <div class="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                        <i class="fas fa-shield-alt mt-0.5 shrink-0"></i>
+                        <span><strong>Produção:</strong> configure <code class="bg-amber-100 px-1 rounded">QZ_CERT_PEM</code> e <code class="bg-amber-100 px-1 rounded">QZ_SIGN_ENDPOINT</code> no código-fonte para impressão sem popup de segurança. Sem isso, cada nova máquina verá "Untrusted website" na primeira impressão (clique em "Allow" + "Remember").</span>
+                    </div>
+                    <div class="flex items-center gap-2 text-sm">
+                        <span class="font-bold">Status:</span>
+                        <span id="qzPanelStatus" class="px-2 py-1 rounded text-xs font-bold bg-gray-100 text-gray-600">Desconectado</span>
+                    </div>
+                    <div>
+                        <label class="text-xs font-bold text-gray-500">Impressora ativa</label>
+                        <select id="printerSelect" class="border p-2 w-full rounded text-sm">
+                            <option value="">— nenhuma selecionada (usa fallback do navegador) —</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-xs font-bold text-gray-500">Largura da bobina</label>
+                        <select id="printerWidth" class="border p-2 w-full rounded text-sm">
+                            <option value="80mm">80mm (padrão — 48 colunas)</option>
+                            <option value="58mm">58mm (compacta — 32 colunas)</option>
+                        </select>
+                    </div>
+                    <div class="flex gap-2 flex-wrap">
+                        <button onclick="qzDetectPrinters()" class="bg-gray-800 text-white px-4 py-2 rounded font-bold text-sm">
+                            <i class="fas fa-search mr-1"></i> Detectar Impressoras
+                        </button>
+                        <button onclick="savePrinterSettings()" class="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm">
+                            <i class="fas fa-save mr-1"></i> Salvar Impressora
+                        </button>
+                        <button onclick="qzTestPrint()" class="bg-green-600 text-white px-4 py-2 rounded font-bold text-sm">
+                            <i class="fas fa-receipt mr-1"></i> Imprimir Teste
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-lg shadow mt-6">
+                    <h3 class="font-bold border-b pb-2">Taxas de Entrega Fixas (Bairros)</h3>
+                    <p class="text-xs text-gray-500 mt-1 mb-3">Configure as taxas fixas por bairro.</p>
+                    <div id="regionsListAdm" class="space-y-2 max-h-60 overflow-y-auto mb-4"></div>
+                    <div class="flex gap-2">
+                        <input type="text" id="newRegName" placeholder="Bairro" class="border p-2 flex-1 rounded">
+                        <input type="number" id="newRegPrice" placeholder="R$" class="border p-2 w-24 rounded">
+                        <button onclick="addRegion()" class="bg-green-600 text-white px-4 rounded font-bold">Add</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- MODAL PRODUTO -->
+    <div id="prodModal" class="fixed inset-0 bg-black bg-opacity-60 hidden flex items-center justify-center z-[70] backdrop-blur-sm p-4 overflow-y-auto">
+        <div class="bg-white p-6 rounded-xl w-full max-w-sm space-y-4 shadow-2xl my-auto">
+            <div class="flex justify-between items-center border-b pb-2">
+                <h3 class="font-bold text-lg text-gray-800">Gerenciar Produto</h3>
+                <button onclick="closeModal()" aria-label="Fechar" class="text-gray-400 hover:text-red-500 text-xl font-bold">&times;</button>
+            </div>
+            
+            <input type="hidden" id="editId">
+            <div>
+                <label class="text-xs font-bold text-gray-500">Nome do Produto</label>
+                <input type="text" id="editName" class="w-full border-2 border-gray-100 p-2 rounded-lg focus:border-brava-yellow outline-none" placeholder="Ex: Cerveja Skol Lata">
+            </div>
+            
+            <div class="flex gap-2">
+                <div class="w-1/2">
+                    <label class="text-xs font-bold text-gray-500">Preço</label>
+                    <input type="number" step="0.01" id="editPrice" class="w-full border-2 border-gray-100 p-2 rounded-lg focus:border-brava-yellow outline-none" placeholder="0.00">
+                </div>
+                <div class="w-1/2">
+                    <label class="text-xs font-bold text-gray-500">Categoria</label>
+                    <select id="editCat" class="w-full border-2 border-gray-100 p-2 rounded-lg bg-white outline-none focus:border-brava-yellow"></select>
+                </div>
+            </div>
+            
+            <div>
+                <label class="text-xs font-bold text-gray-500">Emoji ou URL da Imagem</label>
+                <input type="text" id="editImg" class="w-full border-2 border-gray-100 p-2 rounded-lg focus:border-brava-yellow outline-none" placeholder="🍺 ou https://...">
+            </div>
+            
+            <div>
+                <label class="text-xs font-bold text-gray-500">Descrição (Opcional)</label>
+                <input type="text" id="editDesc" class="w-full border-2 border-gray-100 p-2 rounded-lg focus:border-brava-yellow outline-none" placeholder="Ex: Gelada 350ml">
+            </div>
+
+            <label class="flex items-center gap-2 font-bold bg-gray-50 p-2 rounded-lg cursor-pointer">
+                <input type="checkbox" id="editActive" checked class="w-5 h-5 text-brava-yellow"> 
+                <span class="text-sm text-gray-700">Produto Disponível</span>
+            </label>
+            
+            <div class="flex gap-2 pt-2">
+                <button onclick="saveProduct()" class="flex-1 bg-brava-yellow text-brava-black py-3 rounded-lg font-bold shadow-md hover:brightness-110 active:scale-95 transition">
+                    SALVAR
+                </button>
+            </div>
+            <button onclick="deleteProduct()" id="btnDel" class="w-full text-red-500 text-xs font-bold pt-2 hidden">Excluir Permanente</button>
+            <p id="saveFeedback" class="text-center text-[10px] font-bold text-green-600 hidden">Salvo com sucesso!</p>
+        </div>
+    </div>
+
+    <div id="bulkModal" class="fixed inset-0 bg-black bg-opacity-60 hidden flex items-center justify-center z-[80] backdrop-blur-sm p-4">
+        <div class="bg-white p-6 rounded-xl w-full max-w-2xl h-[80vh] flex flex-col shadow-2xl">
+            <h3 class="font-bold border-b pb-2 mb-4">Importação em Massa</h3>
+            <p class="text-[10px] text-blue-600 font-bold mb-2">Padrão: Nome; Preço; ID_Categoria; Imagem; Descrição</p>
+            <textarea id="bulkInput" class="w-full flex-1 border p-2 rounded font-mono text-xs mb-4" placeholder="Ex: Skol; 5.00; cervejas; 🍺; Gelada"></textarea>
+            <button onclick="processBulkUpload()" class="w-full bg-green-600 text-white py-3 rounded font-bold">IMPORTAR AGORA</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, getDoc, getDocs, setDoc, query, where, orderBy, limit, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        const firebaseConfig = { apiKey: "AIzaSyDcLJgd7hRug4DOdZG5pBVADvb8gv50X04", authDomain: "pede-ai-ff294.firebaseapp.com", projectId: "pede-ai-ff294", storageBucket: "pede-ai-ff294.firebasestorage.app", messagingSenderId: "785420254615", appId: "1:785420254615:web:14723281bba318ac9a98d2" };
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = 'loja-padrao';
+
+        // Helpers de segurança/robustez
+        const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const safeNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+        // Toasts: substituem alert() para erros/sucessos sem bloquear a UI
+        window.showToast = (msg, type = 'error') => {
+            const wrap = document.getElementById('toastContainer');
+            if (!wrap) { console.warn(msg); return; }
+            const styles = {
+                error:   'bg-red-600 text-white',
+                success: 'bg-green-600 text-white',
+                info:    'bg-gray-800 text-white'
+            };
+            const icons = { error: 'fa-circle-exclamation', success: 'fa-circle-check', info: 'fa-circle-info' };
+            const el = document.createElement('div');
+            el.className = `pointer-events-auto max-w-sm shadow-2xl rounded-xl px-4 py-3 text-sm font-bold flex items-start gap-2 ${styles[type] || styles.info} animate-pulse-once`;
+            el.innerHTML = `<i class="fas ${icons[type] || icons.info} mt-0.5"></i><span class="flex-1">${escapeHtml(msg)}</span><button class="opacity-70 hover:opacity-100 ml-1" aria-label="Fechar">&times;</button>`;
+            el.querySelector('button').onclick = () => el.remove();
+            wrap.appendChild(el);
+            setTimeout(() => el.remove(), 5000);
+        };
+
+        window.db = db; window.products = []; window.categories = []; window.settings = {};
+        window.allOrdersCache = []; window.charts = {};
+
+        let soundEnabled = true;
+
+        // Buzina alta sintética via Web Audio API
+        let hornTimer = null;
+        let audioCtx = null;
+
+        function getAudioCtx() {
+            if (!audioCtx || audioCtx.state === 'closed') {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            return audioCtx;
+        }
+
+        function playHornBlast() {
+            try {
+                const ctx = getAudioCtx();
+                const t = ctx.currentTime;
+
+                // Oscilador principal — dente-de-serra (timbre de buzina)
+                const osc1 = ctx.createOscillator();
+                osc1.type = 'sawtooth';
+                osc1.frequency.setValueAtTime(220, t);
+                osc1.frequency.linearRampToValueAtTime(260, t + 0.15);
+                osc1.frequency.linearRampToValueAtTime(220, t + 0.5);
+
+                // Segunda harmônica para corpo
+                const osc2 = ctx.createOscillator();
+                osc2.type = 'square';
+                osc2.frequency.setValueAtTime(440, t);
+                osc2.frequency.linearRampToValueAtTime(520, t + 0.15);
+                osc2.frequency.linearRampToValueAtTime(440, t + 0.5);
+
+                // Distorção para mais agressividade
+                const wave = ctx.createWaveShaper();
+                const curve = new Float32Array(256);
+                for (let i = 0; i < 256; i++) { const x = (i * 2) / 256 - 1; curve[i] = (Math.PI + 400) * x / (Math.PI + 400 * Math.abs(x)); }
+                wave.curve = curve;
+
+                const gain = ctx.createGain();
+                gain.gain.setValueAtTime(0, t);
+                gain.gain.linearRampToValueAtTime(1.0, t + 0.03);   // attack rápido
+                gain.gain.setValueAtTime(1.0, t + 0.4);
+                gain.gain.linearRampToValueAtTime(0, t + 0.55);     // release suave
+
+                osc1.connect(wave); osc2.connect(wave);
+                wave.connect(gain); gain.connect(ctx.destination);
+
+                osc1.start(t); osc1.stop(t + 0.6);
+                osc2.start(t); osc2.stop(t + 0.6);
+            } catch (e) {}
+        }
+
+        function startHorn() {
+            if (hornTimer) return;
+            playHornBlast();
+            hornTimer = setInterval(playHornBlast, 1800);
+        }
+        function stopHorn() { if (hornTimer) { clearInterval(hornTimer); hornTimer = null; } }
+
+        function playAlert() {
+            if (!soundEnabled) return;
+            startHorn();
+        }
+        function stopAlert() {
+            stopHorn();
+        }
+
+        document.getElementById('currentDateDisplay').innerText = new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' });
+
+        function updateOnlineStatus(error = null) {
+            const badge = document.getElementById('dbStatusBadge');
+            const alertBox = document.getElementById('connectionAlert');
+            if (!navigator.onLine || error) {
+                badge.className = 'flex items-center gap-2 px-3 py-1 rounded-full bg-red-100 text-red-700 font-bold text-sm border border-red-200';
+                document.getElementById('dbStatusText').innerText = 'Offline';
+                alertBox.classList.remove('hidden');
+            } else {
+                badge.className = 'flex items-center gap-2 px-3 py-1 rounded-full bg-green-100 text-green-700 font-bold text-sm border border-green-200';
+                document.getElementById('dbStatusText').innerText = 'Online';
+                alertBox.classList.add('hidden');
+            }
+        }
+        
+        // Listener nativo do navegador para internet
+        window.addEventListener('online', () => updateOnlineStatus());
+        window.addEventListener('offline', () => updateOnlineStatus());
+
+        window.attemptLogin = () => {
+            const email = document.getElementById('adminEmail').value.trim();
+            const pass = document.getElementById('adminPass').value;
+            const errEl = document.getElementById('loginError');
+            const btn = document.getElementById('btnLogin');
+            errEl.classList.add('hidden');
+            if (!email || !pass) { errEl.innerText = "Preencha e-mail e senha."; errEl.classList.remove('hidden'); return; }
+            btn.disabled = true; btn.innerText = "ENTRANDO...";
+            signInWithEmailAndPassword(auth, email, pass)
+                .catch((e) => {
+                    // Mensagens específicas pros casos comuns — antes, qualquer erro virava "credencial inválida"
+                    // e o dono trocava a senha sem motivo quando o problema era rede.
+                    const code = (e && e.code) || '';
+                    const map = {
+                        'auth/invalid-credential':     'E-mail ou senha incorretos.',
+                        'auth/invalid-email':          'E-mail inválido.',
+                        'auth/user-not-found':         'E-mail ou senha incorretos.',
+                        'auth/wrong-password':         'E-mail ou senha incorretos.',
+                        'auth/too-many-requests':      'Muitas tentativas. Aguarde alguns minutos.',
+                        'auth/network-request-failed': 'Sem conexão. Verifique sua internet.',
+                        'auth/user-disabled':          'Conta desativada. Fale com o suporte.'
+                    };
+                    errEl.innerText = map[code] || 'Falha ao entrar. Tente novamente.';
+                    errEl.classList.remove('hidden');
+                })
+                .finally(() => { btn.disabled = false; btn.innerText = "ENTRAR"; });
+        };
+
+        // Mantém a sessão e controla o acesso ao painel via estado de autenticação
+        let dashboardStarted = false;
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                document.getElementById('loginScreen').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+                if (!dashboardStarted) { initDashboard(); dashboardStarted = true; }
+                updateOnlineStatus();
+                connectQZSilent(); // tenta QZ Tray em background
+            } else {
+                document.getElementById('dashboard').classList.add('hidden');
+                document.getElementById('loginScreen').classList.remove('hidden');
+            }
+        });
+
+        window.logout = () => signOut(auth);
+
+        // Debounce do refresh do relatório: snapshot dispara muito em hora de pico —
+        // sem isso, cada update vira um getDocs(2000) + 3 redraws de Chart.js.
+        let _reportRefreshTimer = null;
+        function scheduleReportRefresh() {
+            if (document.getElementById('tab-reports').classList.contains('hidden')) return;
+            clearTimeout(_reportRefreshTimer);
+            _reportRefreshTimer = setTimeout(() => applyReportFilter(), 1500);
+        }
+
+        function initDashboard() {
+            // Filtra "hoje" já no Firestore. Antes, o limit(500) global podia engolir
+            // os pedidos do dia em loja movimentada (pedidos antigos ocupavam as 500 vagas).
+            const startOfToday = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); })();
+            const q = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'orders'),
+                where('timestamp', '>=', startOfToday),
+                orderBy('timestamp', 'desc'),
+                limit(500)
+            );
+            onSnapshot(q, (snap) => {
+                const todayStr = new Date().toLocaleDateString('pt-BR');
+                window.allOrdersCache = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                const activeList = document.getElementById('ordersListActive');
+                const historyList = document.getElementById('ordersListHistory');
+                
+                let htmlActive = ''; let htmlHistory = ''; let pendingCount = 0;
+                window._orderMap = {};
+
+                snap.docs.forEach(d => {
+                    const o = d.data();
+                    // Defesa contra docs malformados — um pedido inválido não pode quebrar o render dos outros.
+                    if (!o || !o.customer || !Array.isArray(o.items)) return;
+                    const orderDate = new Date(o.timestamp).toLocaleDateString('pt-BR');
+                    if (orderDate !== todayStr) return;
+
+                    window._orderMap[d.id] = { ...o, id: d.id };
+                    
+                    if (o.status === 'concluido' || o.status === 'cancelado') {
+                        const isCanceled = o.status === 'cancelado';
+                        htmlHistory += `
+                        <div class="bg-white p-3 rounded-lg border-l-4 ${isCanceled ? 'border-gray-300 opacity-60' : 'border-green-400'} shadow-sm flex flex-col justify-between">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <span class="font-bold text-xs truncate">${escapeHtml(o.customer.name)}</span>
+                                    ${isCanceled ? '<span class="ml-1 text-[9px] bg-red-100 text-red-500 font-black px-1 rounded">CANCELADO</span>' : ''}
+                                </div>
+                                ${isCanceled ? '' : `<button onclick="printOrder('${d.id}')" aria-label="Imprimir pedido" class="text-gray-300 hover:text-black"><i class="fas fa-print text-xs"></i></button>`}
+                            </div>
+                            <div class="flex justify-between items-center mt-2">
+                                <div class="text-[10px] text-red-500 font-bold uppercase tracking-tight">Taxa: R$ ${(o.fee || 0).toFixed(2)}</div>
+                                <div class="text-xs text-gray-800 font-black tracking-tight">Total: R$ ${safeNum(o.total).toFixed(2)}</div>
+                            </div>
+                        </div>`;
+                    } else {
+                        let bCls = 'border-red-500 bg-red-50 shadow-md animate-pulse';
+                        let lbl = 'NOVO';
+                        let btn = `<button onclick="updateOrderStatus('${d.id}', 'preparo')" class="flex-1 bg-red-500 text-white py-2 rounded font-bold text-xs">ACEITAR</button>`;
+
+                        if (o.status === 'novo') pendingCount++;
+                        else if (o.status === 'preparo') { bCls = 'border-yellow-500 bg-yellow-50'; lbl = 'PREPARO'; btn = `<button onclick="updateOrderStatus('${d.id}', 'entrega')" class="flex-1 bg-yellow-500 text-white py-2 rounded font-bold text-xs uppercase">Saiu p/ Entrega</button>`; }
+                        else if (o.status === 'entrega') { bCls = 'border-blue-500 bg-blue-50'; lbl = 'ENTREGA'; btn = `<button onclick="updateOrderStatus('${d.id}', 'concluido')" class="flex-1 bg-blue-500 text-white py-2 rounded font-bold text-xs uppercase">Marcar Entregue</button>`; }
+                        const cancelBtn = `<button onclick="cancelOrder('${d.id}')" class="mt-1 w-full border border-red-300 text-red-500 py-1.5 rounded text-xs font-bold hover:bg-red-50 transition">✕ Cancelar Pedido</button>`;
+
+                        const orderTime = o.timestamp ? new Date(o.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+                        htmlActive += `
+                        <div class="bg-white p-4 rounded-lg shadow-sm border-l-4 ${bCls}">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <h4 class="font-bold text-gray-800">${escapeHtml(o.customer.name)}</h4>
+                                    <div class="flex items-center gap-2 mt-0.5">
+                                        <div class="text-[10px] font-black text-gray-400 uppercase">${lbl}</div>
+                                        ${orderTime ? `<div class="text-[10px] text-gray-400"><i class="fas fa-clock text-[8px]"></i> ${orderTime}</div>` : ''}
+                                    </div>
+                                </div>
+                                <button onclick="printOrder('${d.id}')" aria-label="Imprimir pedido" class="text-gray-400 hover:text-black p-2 bg-gray-50 rounded-full"><i class="fas fa-print"></i></button>
+                            </div>
+                            <div class="text-xs text-gray-500 mb-2">
+                                <div class="font-bold text-gray-700 mb-1"><i class="fas fa-phone-alt text-[10px]"></i> ${escapeHtml(o.customer.phone || 'Sem contato')}</div>
+                                <div><i class="fas fa-map-marker-alt text-[10px] text-red-400"></i> ${escapeHtml(o.customer.neighborhood || '')}</div>
+                                <div class="mt-0.5">${escapeHtml(o.customer.street || '')}, ${escapeHtml(o.customer.number || '')}</div>
+                                ${o.customer.complement ? `<div><span class="font-bold">Comp:</span> ${escapeHtml(o.customer.complement)}</div>` : ''}
+                                ${o.customer.reference ? `<div><span class="font-bold">Ref:</span> ${escapeHtml(o.customer.reference)}</div>` : ''}
+                            </div>
+                            <div class="bg-white border p-2 rounded text-sm mb-3">
+                                ${o.items.map(i => `<div class="flex justify-between py-0.5 border-b border-dashed border-gray-100 last:border-0"><span>${safeNum(i.qty)}x ${escapeHtml(i.name)}</span><span>R$ ${safeNum(i.price).toFixed(2)}</span></div>`).join('')}
+                                <div class="mt-1 pt-1 border-t flex justify-between items-center">
+                                    <span class="text-[10px] font-black uppercase text-gray-400">${escapeHtml(o.payment || '')}</span>
+                                    <span class="font-bold text-gray-800">R$ ${safeNum(o.total).toFixed(2)}</span>
+                                </div>
+                            </div>
+                            <div class="flex gap-2">${btn}</div>
+                            ${cancelBtn}
+                        </div>`;
+                    }
+                });
+
+                activeList.innerHTML = htmlActive || '<div class="col-span-full text-center py-10 text-gray-400">Tudo pronto! Aguardando pedidos...</div>';
+                historyList.innerHTML = htmlHistory;
+                document.getElementById('pendingCount').innerText = pendingCount;
+                document.getElementById('pendingCount').classList.toggle('hidden', pendingCount === 0);
+                if(pendingCount > 0 && soundEnabled) { playAlert(); } else { stopAlert(); }
+                scheduleReportRefresh();
+            }, (err) => updateOnlineStatus(err));
+
+            getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories')).then(s => { if(s.exists()){ window.categories = s.data().items; renderCategories(); updateCategoryFilterOptions(); } }).catch(e => console.warn('Categorias:', e)).finally(() => {
+                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'products'), (s) => { window.products = s.docs.map(d => ({id: d.id, ...d.data()})); filterProducts(); });
+            });
+            getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config')).then(s => { if(s.exists()){ window.settings = s.data(); renderSettings(); updateBranding(); } });
+        }
+
+        window.updateOrderStatus = async (id, status) => { try { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', id), { status }); } catch (e) { showToast("Erro ao atualizar pedido: " + e.message); } };
+        window.cancelOrder = async (id) => {
+            if (!confirm('Cancelar este pedido? O cliente verá o status "Cancelado".')) return;
+            try { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', id), { status: 'cancelado' }); }
+            catch (e) { showToast('Erro ao cancelar: ' + e.message); }
+        };
+
+        window.applyReportFilter = async () => {
+            const type = document.getElementById('reportFilterType').value;
+            const now = new Date();
+            let start, end, label = "";
+
+            const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x.getTime(); };
+            const endOfDay   = (d) => { const x = new Date(d); x.setHours(23,59,59,999); return x.getTime(); };
+
+            if (type === 'today') {
+                start = startOfDay(now); end = endOfDay(now); label = "Hoje";
+            } else if (type === 'yesterday') {
+                const y = new Date(now); y.setDate(now.getDate() - 1);
+                start = startOfDay(y); end = endOfDay(y); label = "Ontem";
+            } else if (type === 'this_month') {
+                start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+                end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999).getTime();
+                label = "Este Mês";
+            } else if (type === 'last_month') {
+                let m = now.getMonth() - 1, yr = now.getFullYear();
+                if (m < 0) { m = 11; yr--; }
+                start = new Date(yr, m, 1).getTime();
+                end = new Date(yr, m + 1, 0, 23, 59, 59, 999).getTime();
+                label = "Mês Passado";
+            } else if (type === 'custom_date') {
+                const sel = document.getElementById('reportFilterDate').value;
+                if (!sel) { return; }
+                const [yy, mm, dd] = sel.split('-').map(Number);
+                start = new Date(yy, mm - 1, dd).getTime();
+                end = new Date(yy, mm - 1, dd, 23, 59, 59, 999).getTime();
+                label = sel.split('-').reverse().join('/');
+            } else { return; }
+
+            document.getElementById('statPeriodLabel').innerText = label + ' (carregando...)';
+            const filterBtn = document.querySelector('[onclick="applyReportFilter()"]');
+            if (filterBtn) { filterBtn.disabled = true; filterBtn.innerText = '...'; }
+            try {
+                const rq = query(
+                    collection(db, 'artifacts', appId, 'public', 'data', 'orders'),
+                    where('timestamp', '>=', start),
+                    where('timestamp', '<=', end),
+                    orderBy('timestamp', 'desc'),
+                    limit(2000)
+                );
+                const snap = await getDocs(rq);
+                const filtered = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                const truncated = filtered.length >= 2000;
+                document.getElementById('statPeriodLabel').innerText =
+                    truncated ? label + ' (truncado em 2000)' : label;
+                if (truncated) {
+                    showToast('Relatório truncado em 2000 pedidos — refine o período pra ver tudo.', 'info');
+                }
+                calculateReports(filtered);
+            } catch (e) {
+                document.getElementById('statPeriodLabel').innerText = label;
+                showToast("Erro ao carregar relatório: " + e.message);
+            } finally {
+                if (filterBtn) { filterBtn.disabled = false; filterBtn.innerHTML = '<i class="fas fa-filter mr-1"></i> Filtrar'; }
+            }
+        };
+
+        window.calculateReports = (orders) => {
+            window._lastReportOrders = orders;
+            // Pedidos cancelados não geram receita — excluir de KPIs e gráficos
+            const active = orders.filter(o => o.status !== 'cancelado');
+            const total = active.reduce((acc, curr) => acc + safeNum(curr.total), 0);
+            const totalFees = active.reduce((acc, curr) => acc + safeNum(curr.fee), 0);
+            const fmt = (v) => `R$ ${v.toFixed(2).replace('.', ',')}`;
+
+            const canceled = orders.filter(o => o.status === 'cancelado');
+            const canceledTotal = canceled.reduce((acc, curr) => acc + safeNum(curr.total), 0);
+
+            document.getElementById('statRevenue').innerText = fmt(total);
+            document.getElementById('statOrdersCount').innerText = active.length;
+            document.getElementById('statTicket').innerText = fmt(active.length ? total / active.length : 0);
+            document.getElementById('statFees').innerText = fmt(totalFees);
+            document.getElementById('statCanceled').innerText = canceled.length;
+            document.getElementById('statCanceledValue').innerText = canceled.length ? fmt(canceledTotal) + ' perdidos' : 'Nenhum no período';
+
+            // Gráfico: pedidos por hora (linha com gradiente) — somente ativos
+            const hrs = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}h`);
+            const dataHrs = Array(24).fill(0);
+            active.forEach(o => dataHrs[new Date(o.timestamp).getHours()]++);
+            renderChartLine('chartTime', hrs, dataHrs);
+
+            // Gráfico: top produtos (barras horizontais) — somente ativos
+            const prodCount = {};
+            active.forEach(o => (o.items || []).forEach(i => prodCount[i.name] = (prodCount[i.name] || 0) + safeNum(i.qty)));
+            const top = Object.entries(prodCount).sort((a,b) => b[1] - a[1]).slice(0, 8);
+            renderChartBar('chartProducts', top.map(p => p[0]), top.map(p => p[1]));
+
+            // Gráfico: formas de pagamento (pizza) — somente ativos
+            const payCount = {};
+            active.forEach(o => { const k = (o.payment || 'Não informado').toUpperCase(); payCount[k] = (payCount[k] || 0) + 1; });
+            renderChartDoughnut('chartPayment', Object.keys(payCount), Object.values(payCount));
+
+            // Tabela de entregas — mostra todos os pedidos, cancelados com badge visual
+            const payBadge = (p) => {
+                const m = { 'PIX': 'bg-green-100 text-green-700', 'DINHEIRO': 'bg-yellow-100 text-yellow-700', 'CARTÃO': 'bg-blue-100 text-blue-700', 'CARTAO': 'bg-blue-100 text-blue-700' };
+                const cls = m[(p||'').toUpperCase()] || 'bg-gray-100 text-gray-600';
+                return `<span class="px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${cls}">${escapeHtml(p || '-')}</span>`;
+            };
+            let tableHtml = '';
+            orders.forEach(o => {
+                if (!o) return; // doc malformado não derruba a tabela
+                const isCanceled = o.status === 'cancelado';
+                const d = new Date(o.timestamp);
+                const timeStr = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+                const fee = safeNum(o.fee);
+                const tot = safeNum(o.total);
+                const rowCls = isCanceled ? 'opacity-50 bg-red-50' : 'hover:bg-gray-50';
+                const cancelBadge = isCanceled ? '<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-red-100 text-red-600">cancelado</span>' : '';
+                tableHtml += `<tr class="${rowCls} transition">
+                    <td class="px-4 py-2.5 whitespace-nowrap text-xs text-gray-500 font-bold">${d.toLocaleDateString('pt-BR')} <span class="text-gray-400">${timeStr}</span></td>
+                    <td class="px-4 py-2.5 font-bold text-gray-800 max-w-[140px] truncate ${isCanceled ? 'line-through' : ''}">${escapeHtml(o.customer?.name || '-')}${cancelBadge}</td>
+                    <td class="px-4 py-2.5 text-gray-500 max-w-[130px] truncate">${escapeHtml(o.customer?.neighborhood || '-')}</td>
+                    <td class="px-4 py-2.5">${isCanceled ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-red-100 text-red-600">-</span>' : payBadge(o.payment)}</td>
+                    <td class="px-4 py-2.5 text-right font-bold text-orange-600 text-xs">${isCanceled ? '-' : 'R$ ' + fee.toFixed(2)}</td>
+                    <td class="px-4 py-2.5 text-right font-black text-gray-800 ${isCanceled ? 'line-through' : ''}">${isCanceled ? '-' : 'R$ ' + tot.toFixed(2)}</td>
+                </tr>`;
+            });
+            document.getElementById('deliveryTableBody').innerHTML = tableHtml ||
+                '<tr><td colspan="6" class="text-center py-8 text-gray-300 font-bold">Nenhum pedido no período.</td></tr>';
+            const dc = document.getElementById('deliveryCount');
+            const canceledCount = orders.length - active.length;
+            if (dc) dc.innerText = `${active.length} pedido${active.length !== 1 ? 's' : ''}${canceledCount > 0 ? ` (+ ${canceledCount} cancelado${canceledCount !== 1 ? 's' : ''})` : ''}`;
+        };
+
+        function renderChartLine(id, labels, data) {
+            const ctx = document.getElementById(id).getContext('2d');
+            if (window.charts[id]) window.charts[id].destroy();
+            const grad = ctx.createLinearGradient(0, 0, 0, 200);
+            grad.addColorStop(0, 'rgba(59,130,246,0.3)');
+            grad.addColorStop(1, 'rgba(59,130,246,0)');
+            window.charts[id] = new Chart(ctx, {
+                type: 'line',
+                data: { labels, datasets: [{ label: 'Pedidos', data, fill: true, backgroundColor: grad, borderColor: '#3B82F6', borderWidth: 2.5, pointBackgroundColor: '#3B82F6', pointRadius: 3, pointHoverRadius: 6, tension: 0.4 }] },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: false }, tooltip: { backgroundColor: '#1e293b', titleFont: { weight: 'bold' }, callbacks: { label: ctx => ` ${ctx.parsed.y} pedido(s)` } } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: { size: 10, weight: 'bold' }, color: '#94a3b8', maxTicksLimit: 12 } },
+                        y: { grid: { color: '#f1f5f9' }, ticks: { font: { size: 10, weight: 'bold' }, color: '#94a3b8', stepSize: 1 }, beginAtZero: true }
+                    }
+                }
+            });
+        }
+
+        function renderChartBar(id, labels, data) {
+            const ctx = document.getElementById(id).getContext('2d');
+            if (window.charts[id]) window.charts[id].destroy();
+            const primary = window.settings?.shopColor || '#FFD700';
+            window.charts[id] = new Chart(ctx, {
+                type: 'bar',
+                data: { labels, datasets: [{ label: 'Qtd vendida', data, backgroundColor: primary, borderRadius: 6, borderSkipped: false }] },
+                options: {
+                    responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+                    plugins: { legend: { display: false }, tooltip: { backgroundColor: '#1e293b', callbacks: { label: ctx => ` ${ctx.parsed.x} unid.` } } },
+                    scales: {
+                        x: { grid: { color: '#f1f5f9' }, ticks: { font: { size: 10, weight: 'bold' }, color: '#94a3b8' }, beginAtZero: true },
+                        y: { grid: { display: false }, ticks: { font: { size: 11, weight: 'bold' }, color: '#374151' } }
+                    }
+                }
+            });
+        }
+
+        function renderChartDoughnut(id, labels, data) {
+            const ctx = document.getElementById(id).getContext('2d');
+            if (window.charts[id]) window.charts[id].destroy();
+            const colors = ['#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899'];
+            window.charts[id] = new Chart(ctx, {
+                type: 'doughnut',
+                data: { labels, datasets: [{ data, backgroundColor: colors.slice(0, labels.length), borderWidth: 3, borderColor: '#fff', hoverOffset: 6 }] },
+                options: {
+                    responsive: true, maintainAspectRatio: false, cutout: '65%',
+                    plugins: {
+                        legend: { position: 'bottom', labels: { padding: 12, font: { size: 11, weight: 'bold' }, color: '#374151', boxWidth: 12, borderRadius: 3 } },
+                        tooltip: { backgroundColor: '#1e293b', callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed} pedido(s)` } }
+                    }
+                }
+            });
+        }
+
+        window.filterProducts = () => {
+            const term = document.getElementById('productSearch').value.toLowerCase();
+            const catId = document.getElementById('categoryFilter').value;
+            const filtered = window.products.filter(p => (p.name.toLowerCase().includes(term) || (p.desc && p.desc.toLowerCase().includes(term))) && (catId === 'all' || p.cat === catId));
+            document.getElementById('productCounter').innerText = `${filtered.length} encontrados`;
+            renderProducts(filtered);
+        };
+
+        window.renderProducts = (list) => {
+            document.getElementById('productsListAdmin').innerHTML = list.map(p => `<div class="p-4 flex justify-between items-center hover:bg-gray-50 border-l-4 ${p.active === false ? 'border-red-400 bg-red-50' : 'border-green-400'}" onclick="editProduct('${p.id}')">
+                <div class="flex items-center gap-4"><div class="w-12 h-12 rounded border bg-white flex items-center justify-center text-2xl overflow-hidden">${(p.img && p.img.includes('http')) ? `<img src="${escapeHtml(p.img)}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : escapeHtml(p.img || '📦')}</div>
+                <div><div class="font-bold ${p.active === false ? 'line-through opacity-50' : ''}">${escapeHtml(p.name)}</div><div class="text-xs text-gray-500 font-bold">R$ ${safeNum(p.price).toFixed(2)}</div></div></div><i class="fas fa-pen text-gray-300"></i></div>`).join('');
+        };
+
+        // ====================================================================
+        //  IMPRESSÃO TÉRMICA VIA QZ TRAY (ESC/POS)
+        // --------------------------------------------------------------------
+        //  Substitui o window.print() do navegador por comunicação direta
+        //  com a impressora térmica. Resultado: sem driver no caminho, sem
+        //  papel longo, impressão instantânea. Se o QZ Tray não estiver
+        //  disponível, cai automaticamente no método antigo (legacyPrintOrder).
+        // ====================================================================
+
+        // --- Segurança do QZ Tray ---
+        // Em DEV (sem certificado): assinatura vazia, aparece popup "Untrusted website" na 1ª impressão.
+        //   → resolva marcando "Remember this decision" + Allow.
+        // Em PROD (SaaS comercial): preencher QZ_CERT_PEM com o conteúdo do certificado público
+        //   e configurar SIGN_ENDPOINT pra assinar via backend (a chave privada NUNCA fica no front).
+        //   Com isso, popup nenhum em nenhuma máquina, em nenhum cliente.
+        const QZ_CERT_PEM = "";              // cole aqui o conteúdo .crt quando tiver o certificado
+        const QZ_SIGN_ENDPOINT = "";         // ex: "https://api.suamarca.com/qz-sign" — assina SHA-512 e devolve base64
+
+        if (window.qz) {
+            // Promessa do certificado: devolve o PEM se configurado, senão vazio (modo dev)
+            qz.security.setCertificatePromise((resolve, reject) => {
+                if (QZ_CERT_PEM) resolve(QZ_CERT_PEM);
+                else resolve();
+            });
+
+            // Promessa de assinatura: chama endpoint do backend pra assinar a requisição
+            qz.security.setSignatureAlgorithm("SHA512");
+            qz.security.setSignaturePromise((toSign) => {
+                return (resolve, reject) => {
+                    if (!QZ_SIGN_ENDPOINT) { resolve(); return; } // modo dev: sem assinatura
+                    fetch(QZ_SIGN_ENDPOINT, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: toSign
+                    })
+                    .then(r => r.text())
+                    .then(sig => resolve(sig))
+                    .catch(err => reject(err));
+                };
+            });
+        }
+
+        // --- Bytes de controle ESC/POS ---
+        const ESC_B = '\x1B', GS_B = '\x1D', LF_B = '\x0A';
+        const CMD = {
+            INIT:          ESC_B + '@',
+            CODEPAGE_PT:   ESC_B + 't' + '\x03',     // CP860 (Português)
+            ALIGN_LEFT:    ESC_B + 'a' + '\x00',
+            ALIGN_CENTER:  ESC_B + 'a' + '\x01',
+            BOLD_ON:       ESC_B + 'E' + '\x01',
+            BOLD_OFF:      ESC_B + 'E' + '\x00',
+            DOUBLE_SIZE:   GS_B  + '!' + '\x11',
+            DOUBLE_HEIGHT: GS_B  + '!' + '\x01',
+            NORMAL_SIZE:   GS_B  + '!' + '\x00',
+            FEED_3:        LF_B + LF_B + LF_B,
+            CUT_PARTIAL:   GS_B  + 'V' + '\x42' + '\x00'
+        };
+        // Largura em colunas conforme bobina configurada (80mm=48, 58mm=32)
+        const getCols = () => (window.settings && window.settings.printerWidth === '58mm') ? 32 : 48;
+
+        // Remove acentos pra impressão robusta em qualquer codepage
+        const stripAccents = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const dashLine = () => '-'.repeat(getCols()) + LF_B;
+        const escRow = (left, right) => {
+            const l = stripAccents(left), r = stripAccents(right);
+            const space = Math.max(1, getCols() - l.length - r.length);
+            return l + ' '.repeat(space) + r + LF_B;
+        };
+
+        // Monta o ticket completo em bytes ESC/POS
+        function buildTicketBytes(o) {
+            const s = window.settings || {};
+            const shop = {
+                name:    s.shopName    || 'BRAVA CONVENIENCIA',
+                address: s.shopAddress || 'AVENIDA ATLANTICA 3480',
+                phone:   s.shopPhone   || '',
+                cnpj:    s.shopCnpj    || '',
+                footer:  s.shopFooter  || 'Obrigado pela preferencia!'
+            };
+
+            let out = '';
+            out += CMD.INIT + CMD.CODEPAGE_PT;
+            // Cabeçalho
+            out += CMD.ALIGN_CENTER + CMD.BOLD_ON + CMD.DOUBLE_SIZE;
+            out += stripAccents(shop.name) + LF_B;
+            out += CMD.NORMAL_SIZE + stripAccents(shop.address) + LF_B;
+            if (shop.phone) out += stripAccents('TEL: ' + shop.phone) + LF_B;
+            if (shop.cnpj)  out += stripAccents('CNPJ: ' + shop.cnpj) + LF_B;
+            out += CMD.BOLD_OFF + dashLine();
+            // Pedido
+            const idCurto = (o.id || '????').slice(-4).toUpperCase();
+            const data = new Date(o.timestamp || Date.now()).toLocaleString('pt-BR');
+            out += CMD.ALIGN_CENTER + CMD.BOLD_ON + `PEDIDO: #${idCurto}` + LF_B;
+            out += CMD.BOLD_OFF + data + LF_B + dashLine();
+            // Cliente
+            out += CMD.ALIGN_LEFT;
+            out += stripAccents(`CLIENTE: ${o.customer.name || 'N/I'}`) + LF_B;
+            out += stripAccents(`TEL: ${o.customer.phone || 'N/I'}`) + LF_B;
+            out += stripAccents(`END: ${o.customer.street || ''}, ${o.customer.number || ''}`) + LF_B;
+            out += stripAccents(`BAIRRO: ${o.customer.neighborhood || ''}`) + LF_B;
+            if (o.customer.cep)        out += stripAccents(`CEP: ${o.customer.cep}`) + LF_B;
+            if (o.customer.complement) out += stripAccents(`COMPL: ${o.customer.complement}`) + LF_B;
+            if (o.customer.reference)  out += stripAccents(`REF: ${o.customer.reference}`) + LF_B;
+            out += dashLine();
+            // Itens
+            for (const item of (o.items || [])) {
+                const nome  = `${safeNum(item.qty)}x ${item.name}`;
+                const preco = safeNum(item.price).toFixed(2);
+                if (nome.length > getCols() - 8) {
+                    out += stripAccents(nome) + LF_B + escRow('', preco);
+                } else {
+                    out += escRow(nome, preco);
+                }
+            }
+            out += dashLine();
+            // Totais
+            const sub = (safeNum(o.total) - safeNum(o.fee)).toFixed(2);
+            out += escRow('Subtotal:', sub);
+            out += escRow('TAXA:', safeNum(o.fee).toFixed(2));
+            out += CMD.BOLD_ON + CMD.DOUBLE_HEIGHT;
+            out += escRow('TOTAL:', safeNum(o.total).toFixed(2));
+            out += CMD.NORMAL_SIZE + CMD.BOLD_OFF + dashLine();
+            // Pagamento
+            out += stripAccents(`PAGAMENTO: ${(o.payment || '').toUpperCase()}`) + LF_B;
+            if (o.change) out += stripAccents(`TROCO: ${o.change}`) + LF_B;
+            out += dashLine();
+            // Rodapé
+            out += CMD.ALIGN_CENTER + stripAccents(shop.footer) + LF_B;
+            out += CMD.FEED_3 + CMD.CUT_PARTIAL;
+            return out;
+        }
+
+        // --- Estado e controles do QZ Tray ---
+        const qzReady = () => window.qz && qz.websocket && qz.websocket.isActive();
+
+        function updateQzStatus(state) {
+            // state: 'on' | 'off' | 'no-printer'
+            const badge = document.getElementById('qzStatusBadge');
+            const badgeTxt = document.getElementById('qzStatusText');
+            const panel = document.getElementById('qzPanelStatus');
+            if (!badge) return;
+            if (state === 'on') {
+                badge.className = 'flex items-center gap-2 px-3 py-1 rounded-full bg-green-100 text-green-700 font-bold text-sm border border-green-200';
+                badgeTxt.innerText = window.settings.printerName ? 'On' : 'Sem impr.';
+                if (panel) { panel.innerText = 'Conectado'; panel.className = 'px-2 py-1 rounded text-xs font-bold bg-green-100 text-green-700'; }
+            } else {
+                badge.className = 'flex items-center gap-2 px-3 py-1 rounded-full bg-gray-100 text-gray-500 font-bold text-sm border border-gray-200';
+                badgeTxt.innerText = 'Off';
+                if (panel) { panel.innerText = 'Desconectado'; panel.className = 'px-2 py-1 rounded text-xs font-bold bg-gray-100 text-gray-600'; }
+            }
+        }
+
+        // Conexão silenciosa em background — chamada uma vez no login
+        async function connectQZSilent() {
+            if (!window.qz) { updateQzStatus('off'); return; }
+            try {
+                if (!qz.websocket.isActive()) await qz.websocket.connect({ retries: 1, delay: 1 });
+                updateQzStatus('on');
+            } catch (err) {
+                console.warn('QZ Tray indisponível (silencioso):', err.message);
+                updateQzStatus('off');
+            }
+        }
+
+        // Detectar impressoras (botão na aba Configurações)
+        window.qzDetectPrinters = async () => {
+            try {
+                if (!qz.websocket.isActive()) await qz.websocket.connect();
+                updateQzStatus('on');
+                const printers = await qz.printers.find();
+                const sel = document.getElementById('printerSelect');
+                const current = window.settings.printerName || '';
+                sel.innerHTML = '<option value="">— nenhuma selecionada (usa fallback do navegador) —</option>' +
+                    printers.map(p => `<option value="${p}" ${p === current ? 'selected' : ''}>${p}</option>`).join('');
+                showToast(`${printers.length} impressora(s) encontrada(s).`, 'success');
+            } catch (err) {
+                updateQzStatus('off');
+                showToast('Não foi possível conectar ao QZ Tray. ' + (err.message || err) + ' Verifique se o QZ Tray está aberto (ícone perto do relógio).');
+            }
+        };
+
+        // Salvar impressora escolhida no Firebase
+        window.savePrinterSettings = async () => {
+            const name = document.getElementById('printerSelect').value;
+            window.settings.printerName  = name;
+            window.settings.printerWidth = document.getElementById('printerWidth').value || '80mm';
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), window.settings);
+                updateQzStatus(qzReady() ? 'on' : 'off');
+                showToast(name ? `Impressora salva: ${name} (${window.settings.printerWidth})` : 'Impressora removida (vai usar fallback do navegador).', 'success');
+            } catch (e) {
+                showToast('Erro ao salvar: ' + e.message);
+            }
+        };
+
+        // Imprimir teste com pedido fake
+        window.qzTestPrint = async () => {
+            const printerName = window.settings.printerName;
+            if (!printerName) { showToast('Selecione uma impressora e salve antes de testar.'); return; }
+            const fake = {
+                id: 'TEST-' + Date.now().toString(36).toUpperCase(),
+                timestamp: Date.now(),
+                customer: { name: 'TESTE DE IMPRESSAO', phone: '47 99999-9999', street: 'Rua Teste', number: '123', neighborhood: 'Centro' },
+                items: [{ qty: 1, name: 'Item de teste', price: 10.00 }],
+                total: 17.00, fee: 7.00, payment: 'DINHEIRO'
+            };
+            const ok = await tryPrintEscPos(fake, printerName);
+            if (ok) showToast('Teste enviado! Confira a impressora.', 'success');
+        };
+
+        // Tenta imprimir via ESC/POS. Retorna true se conseguiu, false se falhou.
+        async function tryPrintEscPos(order, printerName) {
+            try {
+                if (!qz.websocket.isActive()) await qz.websocket.connect();
+                updateQzStatus('on');
+                const config = qz.configs.create(printerName, { encoding: 'CP860', scaleContent: false });
+                const bytes = buildTicketBytes(order);
+                await qz.print(config, [{ type: 'raw', format: 'plain', data: bytes }]);
+                return true;
+            } catch (err) {
+                console.warn('Falha ESC/POS, caindo no fallback:', err);
+                updateQzStatus('off');
+                return false;
+            }
+        }
+
+        // ====================================================================
+        //  FALLBACK: impressão pelo navegador (jeito antigo)
+        // --------------------------------------------------------------------
+        //  Mantido como rede de segurança quando o QZ Tray não está disponível.
+        //  Não tem mais a "papelada longa" como problema crítico porque agora
+        //  só é usado em caso de falha — mas continua funcional.
+        // ====================================================================
+        function legacyPrintOrder(o) {
+            const shop = {
+                name:    (window.settings || {}).shopName    || 'BRAVA CONVENIENCIA',
+                address: (window.settings || {}).shopAddress || 'AVENIDA ATLÂNTICA 3480',
+                footer:  (window.settings || {}).shopFooter  || 'Obrigado pela preferência!'
+            };
+            const sub = (safeNum(o.total) - safeNum(o.fee)).toFixed(2);
+            let addressStr = `CLIENTE: ${escapeHtml(o.customer.name)}<br>TEL: ${escapeHtml(o.customer.phone || 'N/A')}<br>END: ${escapeHtml(o.customer.street)}, ${escapeHtml(o.customer.number)}<br>BAIRRO: ${escapeHtml(o.customer.neighborhood)}`;
+            if(o.customer.cep) addressStr += `<br>CEP: ${escapeHtml(o.customer.cep)}`;
+            if(o.customer.complement) addressStr += `<br>COMPL: ${escapeHtml(o.customer.complement)}`;
+            if(o.customer.reference) addressStr += `<br>REF: ${escapeHtml(o.customer.reference)}`;
+            const content = `<div class="print-header">${escapeHtml(shop.name)}</div><div class="print-subheader">${escapeHtml(shop.address)}</div><div class="print-line"></div><div class="print-section text-center">PEDIDO: #${o.id.slice(-4).toUpperCase()}<br>${new Date(o.timestamp).toLocaleString()}</div><div class="print-line"></div><div class="print-section">${addressStr}</div><div class="print-line"></div><div class="print-section">${o.items.map(i=>`<div class="print-row"><span>${safeNum(i.qty)}x ${escapeHtml(i.name)}</span><span>${safeNum(i.price).toFixed(2)}</span></div>`).join('')}</div><div class="print-line"></div><div class="print-section"><div class="print-row"><span>Subtotal:</span><span>${sub}</span></div><div class="print-row"><span>TAXA:</span><span>${safeNum(o.fee).toFixed(2)}</span></div><div class="print-row" style="font-size:16px"><span>TOTAL:</span><span>${safeNum(o.total).toFixed(2)}</span></div></div><div class="print-line"></div><div class="print-section uppercase">PAGAMENTO: ${escapeHtml(o.payment)} ${o.change ? `<br>TROCO: ${escapeHtml(o.change)}` : ''}</div><div class="print-line"></div><div class="print-center">${escapeHtml(shop.footer)}</div>`;
+            document.getElementById('printableArea').innerHTML = content;
+            window.print();
+        }
+
+        // ====================================================================
+        //  printOrder REESCRITO: tenta ESC/POS primeiro, fallback automático
+        // ====================================================================
+        window.printOrder = async (orderId) => {
+            const o = (window._orderMap && window._orderMap[orderId])
+                ? window._orderMap[orderId]
+                : window.allOrdersCache.find(x => x.id === orderId);
+            if (!o) return;
+            const printerName = window.settings.printerName;
+            // Caminho preferido: QZ Tray + impressora configurada
+            if (printerName) {
+                const ok = await tryPrintEscPos(o, printerName);
+                if (ok) return;
+            }
+            // Fallback: impressão tradicional pelo navegador
+            legacyPrintOrder(o);
+        };
+
+        // Gera <option>s do select de categorias com escape — evita XSS authenticated
+        const renderCatOptions = () => window.categories
+            .map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`)
+            .join('');
+
+        window.editProduct = (id) => {
+            const p = window.products.find(x => x.id === id);
+            if (!p) return;
+            document.getElementById('editId').value = id;
+            document.getElementById('editName').value = p.name;
+            document.getElementById('editPrice').value = p.price;
+            document.getElementById('editImg').value = p.img;
+            document.getElementById('editDesc').value = p.desc || '';
+            document.getElementById('editActive').checked = p.active !== false;
+            document.getElementById('editCat').innerHTML = renderCatOptions();
+            document.getElementById('editCat').value = p.cat;
+            document.getElementById('btnDel').classList.remove('hidden');
+            document.getElementById('prodModal').classList.remove('hidden');
+        };
+
+        window.saveProduct = async () => { 
+            const id = document.getElementById('editId').value; 
+            const data = { 
+                name: document.getElementById('editName').value, 
+                price: parseFloat(document.getElementById('editPrice').value), 
+                img: document.getElementById('editImg').value, 
+                desc: document.getElementById('editDesc').value, 
+                cat: document.getElementById('editCat').value, 
+                active: document.getElementById('editActive').checked 
+            }; 
+            
+            try {
+                if(id) { 
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'products', id), data, { merge: true }); 
+                    document.getElementById('prodModal').classList.add('hidden'); 
+                } else { 
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'products'), data); 
+                    const feedback = document.getElementById('saveFeedback');
+                    feedback.classList.remove('hidden');
+                    setTimeout(() => feedback.classList.add('hidden'), 2000);
+                    document.getElementById('editName').value = '';
+                    document.getElementById('editPrice').value = '';
+                    document.getElementById('editImg').value = '';
+                    document.getElementById('editDesc').value = '';
+                    document.getElementById('editName').focus();
+                } 
+            } catch(e) {
+                showToast("Erro ao salvar: " + e.message);
+            }
+        };
+
+        window.deleteProduct = async () => { if(confirm("Excluir?")) { try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'products', document.getElementById('editId').value)); document.getElementById('prodModal').classList.add('hidden'); } catch (e) { showToast("Erro ao excluir: " + e.message); } } };
+        window.openProductModal = () => {
+            document.getElementById('editId').value = '';
+            document.getElementById('editName').value = '';
+            document.getElementById('editPrice').value = '';
+            document.getElementById('editImg').value = '';
+            document.getElementById('editDesc').value = '';
+            document.getElementById('editCat').innerHTML = renderCatOptions();
+            document.getElementById('prodModal').classList.remove('hidden');
+            document.getElementById('editName').focus();
+        };
+        window.closeModal = () => document.getElementById('prodModal').classList.add('hidden');
+        window.openBulkModal = () => document.getElementById('bulkModal').classList.remove('hidden');
+        window.processBulkUpload = async () => {
+            const raw = document.getElementById('bulkInput').value.trim().split('\n');
+            if (raw.length > 500) return showToast('Limite de 500 linhas por importação. Divida o arquivo.');
+            const batch = writeBatch(db);
+            const col = collection(db, 'artifacts', appId, 'public', 'data', 'products');
+            let count = 0;
+            const errors = [];
+            raw.forEach((line, i) => {
+                if (!line.trim()) return; // linha em branco: ignora sem reportar
+                const [name, price, cat, img, desc] = line.split(';').map(s => (s || '').trim());
+                if (!name)                                      { errors.push(`Linha ${i+1}: nome vazio`); return; }
+                if (name.length > 120)                          { errors.push(`Linha ${i+1}: nome > 120 caracteres`); return; }
+                if (!price)                                     { errors.push(`Linha ${i+1}: preço vazio`); return; }
+                const parsedPrice = parseFloat(String(price).replace(',','.'));
+                if (isNaN(parsedPrice) || parsedPrice < 0 || parsedPrice > 99999) {
+                    errors.push(`Linha ${i+1}: preço inválido ("${price}")`);
+                    return;
+                }
+                batch.set(doc(col), {
+                    name: name.slice(0,120),
+                    price: parsedPrice,
+                    cat: (cat || 'outros').slice(0,40),
+                    img: (img || '📦').slice(0,200),
+                    desc: (desc || '').slice(0,200),
+                    active: true
+                });
+                count++;
+            });
+            if (errors.length) { showToast('Erros encontrados: ' + errors.join('; ')); return; }
+            try {
+                await batch.commit();
+                showToast(`${count} produto(s) importado(s)!`, 'success');
+                document.getElementById('bulkModal').classList.add('hidden');
+            } catch (e) {
+                showToast('Erro ao importar: ' + e.message);
+            }
+        };
+        window.renderCategories = () => { document.getElementById('categoriesListAdmin').innerHTML = window.categories.map((c, i) => `<div class="bg-white p-3 rounded flex justify-between border items-center font-bold"><span>${escapeHtml(c.name)}</span><button onclick="remCat(${i})" class="text-red-500">&times;</button></div>`).join(''); };
+        window.addCategory = async () => {
+            const raw = (document.getElementById('newCatName').value || '').trim();
+            if (!raw) return;
+            // ID determinístico: sem acentos, sem espaços, só alfanumérico + underscore
+            const id = raw.toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            if (!id) { showToast('Nome de categoria inválido.'); return; }
+            if (window.categories.some(c => c.id === id)) { showToast('Já existe uma categoria com esse nome.'); return; }
+            window.categories.push({ id, name: raw });
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), { items: window.categories });
+                renderCategories();
+                updateCategoryFilterOptions();
+                document.getElementById('newCatName').value = '';
+            } catch (e) {
+                window.categories.pop();
+                showToast("Erro ao adicionar categoria: " + e.message);
+            }
+        };
+        window.remCat = async (i) => {
+            const cat = window.categories[i];
+            const inUse = window.products.filter(p => p.cat === cat.id).length;
+            const msg = inUse > 0
+                ? `A categoria "${cat.name}" possui ${inUse} produto(s) vinculado(s). Removê-la tornará esses produtos invisíveis no site do cliente. Deseja continuar?`
+                : `Remover a categoria "${cat.name}"?`;
+            if (!confirm(msg)) return;
+            const removed = window.categories.splice(i, 1);
+            try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), { items: window.categories }); renderCategories(); updateCategoryFilterOptions(); }
+            catch (e) { window.categories.splice(i, 0, ...removed); showToast("Erro ao remover: " + e.message); }
+        };
+        window.updateCategoryFilterOptions = () => { document.getElementById('categoryFilter').innerHTML = '<option value="all">Todas as Categorias</option>' + window.categories.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join(''); };
+        
+        window.updateBranding = () => {
+            const name = (window.settings.shopName || '').trim().toUpperCase() || 'ADMIN';
+            const brand = document.getElementById('sidebarBrand');
+            if (brand) brand.innerText = name;
+            document.title = `${name} | Painel`;
+
+            // Cor primária via CSS variable
+            const color = window.settings.shopColor || '#FFD700';
+            document.documentElement.style.setProperty('--brand-primary', color);
+
+            // Favicon dinâmico: logo se houver, senão SVG com primeira letra do nome na cor primária
+            const fav = document.getElementById('faviconEl');
+            if (fav) {
+                if (window.settings.shopLogo) {
+                    fav.href = window.settings.shopLogo;
+                } else {
+                    const letter = name.charAt(0) || 'A';
+                    const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' fill='${color}'/><text x='50%' y='55%' text-anchor='middle' font-size='40' font-weight='900' fill='%230a0a0a' font-family='Arial'>${letter}</text></svg>`;
+                    fav.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+                }
+            }
+        };
+
+        window.renderSettings = () => {
+            document.getElementById('admOpen').value = window.settings.openHour || 0;
+            document.getElementById('admOpenMin').value = window.settings.openMinute || 0;
+            document.getElementById('admClose').value = window.settings.closeHour || 0;
+            document.getElementById('admCloseMin').value = window.settings.closeMinute || 0;
+            document.getElementById('regionsListAdm').innerHTML = (window.settings.regions || []).map((r, i) => `<div class="flex justify-between border-b p-2 items-center bg-white mb-1 rounded font-bold"><span>${escapeHtml(r.name)}</span><span>R$ ${escapeHtml(String(r.price))}</span><button onclick="remReg(${i})" class="text-red-500">&times;</button></div>`).join(''); 
+            // Dados da empresa
+            document.getElementById('shopName').value     = window.settings.shopName     || '';
+            document.getElementById('shopAddress').value  = window.settings.shopAddress  || '';
+            document.getElementById('shopCity').value     = window.settings.shopCity     || 'Balneário Camboriú';
+            document.getElementById('shopPhone').value    = window.settings.shopPhone    || '';
+            document.getElementById('shopWhatsapp').value = window.settings.shopWhatsapp || '';
+            document.getElementById('shopCnpj').value     = window.settings.shopCnpj     || '';
+            document.getElementById('shopTagline').value  = window.settings.shopTagline  || '';
+            document.getElementById('shopFooter').value   = window.settings.shopFooter   || '';
+            document.getElementById('shopLogo').value     = window.settings.shopLogo     || '';
+            const color = window.settings.shopColor || '#FFD700';
+            document.getElementById('shopColor').value    = color;
+            document.getElementById('shopColorHex').value = color;
+            document.getElementById('printerWidth').value = window.settings.printerWidth || '80mm';
+            // Mostra a impressora salva no dropdown (mesmo sem ter detectado ainda)
+            const sel = document.getElementById('printerSelect');
+            if (sel && window.settings.printerName) {
+                sel.innerHTML = `<option value="${window.settings.printerName}" selected>${window.settings.printerName}</option><option value="">— remover —</option>`;
+            }
+            updateQzStatus(qzReady() ? 'on' : 'off');
+        };
+
+        window.saveShopInfo = async () => {
+            const name = document.getElementById('shopName').value.trim();
+            if (!name) { showToast('Nome da loja é obrigatório.'); return; }
+
+            // WhatsApp: auto-prefixar 55 se for número BR sem DDI
+            let whatsapp = document.getElementById('shopWhatsapp').value.trim().replace(/\D/g, '');
+            if (whatsapp.length === 10 || whatsapp.length === 11) whatsapp = '55' + whatsapp;
+            if (whatsapp) {
+                const lenOk    = (whatsapp.length === 12 || whatsapp.length === 13);
+                const prefixOk = whatsapp.startsWith('55');
+                if (!lenOk || !prefixOk) {
+                    return showToast(`WhatsApp inválido: "${whatsapp}". Deve ter 12 ou 13 dígitos iniciando com 55 (DDI Brasil). Ex: 5547999999999`);
+                }
+            }
+
+            // Cor: sincronizar hex digitado com color picker
+            let color = document.getElementById('shopColorHex').value.trim();
+            if (!/^#[0-9A-Fa-f]{6}$/.test(color)) color = document.getElementById('shopColor').value;
+
+            const city = document.getElementById('shopCity').value.trim();
+            if (!city) { showToast('Cidade de entrega é obrigatória.'); return; }
+
+            window.settings.shopName     = name;
+            window.settings.shopAddress  = document.getElementById('shopAddress').value.trim();
+            window.settings.shopCity     = city;
+            window.settings.shopPhone    = document.getElementById('shopPhone').value.trim();
+            window.settings.shopWhatsapp = whatsapp;
+            window.settings.shopCnpj     = document.getElementById('shopCnpj').value.trim();
+            window.settings.shopTagline  = document.getElementById('shopTagline').value.trim();
+            window.settings.shopFooter   = document.getElementById('shopFooter').value.trim();
+            window.settings.shopLogo     = document.getElementById('shopLogo').value.trim();
+            window.settings.shopColor    = color;
+            const saveBtn = document.querySelector('[onclick="saveShopInfo()"]');
+            const origHtml = saveBtn ? saveBtn.innerHTML : '';
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Salvando...'; }
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), window.settings);
+                updateBranding();
+                if (saveBtn) { saveBtn.innerHTML = '<i class="fas fa-check mr-1"></i> Salvo!'; setTimeout(() => { saveBtn.disabled = false; saveBtn.innerHTML = origHtml; }, 1500); }
+            } catch (e) {
+                showToast('Erro ao salvar: ' + e.message);
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = origHtml; }
+            }
+        };
+
+        // Sincroniza color picker ↔ input hex em tempo real
+        // Usa requestIdleCallback/setTimeout pois o módulo ES executa após DOMContentLoaded
+        setTimeout(() => {
+            const cp = document.getElementById('shopColor');
+            const hex = document.getElementById('shopColorHex');
+            if (cp && hex) {
+                cp.addEventListener('input', () => hex.value = cp.value.toUpperCase());
+                hex.addEventListener('input', () => { if (/^#[0-9A-Fa-f]{6}$/.test(hex.value)) cp.value = hex.value; });
+            }
+        }, 0);
+        
+        window.saveSettings = async () => {
+            const openH    = parseInt(document.getElementById('admOpen').value);
+            const openMin  = parseInt(document.getElementById('admOpenMin').value) || 0;
+            const closeH   = parseInt(document.getElementById('admClose').value);
+            const closeMin = parseInt(document.getElementById('admCloseMin').value) || 0;
+            if (isNaN(openH)  || openH  < 0 || openH  > 23) return showToast('Horário de abertura inválido. Use um valor entre 0 e 23.');
+            if (isNaN(closeH) || closeH < 0 || closeH > 23) return showToast('Horário de fechamento inválido. Use um valor entre 0 e 23.');
+            if (openMin  < 0 || openMin  > 59) return showToast('Minuto de abertura inválido. Use um valor entre 0 e 59.');
+            if (closeMin < 0 || closeMin > 59) return showToast('Minuto de fechamento inválido. Use um valor entre 0 e 59.');
+            window.settings.openHour    = openH;
+            window.settings.openMinute  = openMin;
+            window.settings.closeHour   = closeH;
+            window.settings.closeMinute = closeMin;
+            const btn = document.querySelector('[onclick="saveSettings()"]');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Salvando...'; }
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), window.settings);
+                if (btn) { btn.innerHTML = '<i class="fas fa-check mr-1"></i> Salvo!'; setTimeout(() => { btn.disabled = false; btn.innerHTML = orig; }, 1500); }
+            } catch (e) {
+                showToast('Erro ao salvar: ' + e.message);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        };
+        
+        window.addRegion = async () => { const name = document.getElementById('newRegName').value; const price = parseFloat(document.getElementById('newRegPrice').value); if(!name || isNaN(price)) return; if(!window.settings.regions) window.settings.regions = []; window.settings.regions.push({name, price}); try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), window.settings); renderSettings(); document.getElementById('newRegName').value = ''; document.getElementById('newRegPrice').value = ''; } catch (e) { window.settings.regions.pop(); showToast("Erro ao adicionar bairro: " + e.message); } };
+        window.remReg = async (i) => { if(confirm("Remover?")) { const removed = window.settings.regions.splice(i, 1); try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), window.settings); renderSettings(); } catch (e) { window.settings.regions.splice(i, 0, ...removed); showToast("Erro ao remover: " + e.message); } } };
+        window.toggleSound = () => { soundEnabled = !soundEnabled; const btn = document.getElementById('soundBtn'); btn.innerHTML = soundEnabled ? '<i class="fas fa-volume-up"></i> Som Ativado' : '<i class="fas fa-volume-mute"></i> Som Mudo'; if (!soundEnabled) stopHorn(); };
+        window.showTab = (id) => { ['orders', 'reports', 'products', 'categories', 'settings'].forEach(t => { document.getElementById(`tab-${t}`).classList.add('hidden'); document.getElementById(`nav-${t}`).classList.remove('bg-gray-800', 'text-brava-yellow', 'font-bold'); }); document.getElementById(`tab-${id}`).classList.remove('hidden'); document.getElementById(`nav-${id}`).classList.add('bg-gray-800', 'text-brava-yellow', 'font-bold'); if(id === 'reports') applyReportFilter(); };
+        window.toggleReportInputs = () => { const type = document.getElementById('reportFilterType').value; document.getElementById('reportFilterDate').classList.toggle('hidden', type !== 'custom_date'); };
+
+        // Captura global de erros JS — armazena em localStorage para diagnóstico sem Sentry
+        window.onerror = (msg, src, line, col, err) => {
+            try {
+                const log = JSON.parse(localStorage.getItem('_errLog') || '[]');
+                log.unshift({ ts: new Date().toISOString(), msg: String(msg), src: String(src).split('/').pop(), line, col });
+                localStorage.setItem('_errLog', JSON.stringify(log.slice(0, 50)));
+            } catch(_) {}
+            return false; // não suprime o erro
+        };
+        window.addEventListener('unhandledrejection', (e) => {
+            window.onerror('Promise: ' + (e.reason?.message || e.reason), location.href, 0, 0, e.reason);
+        });
+
+        // Mostra email do admin logado no badge
+        onAuthStateChanged(auth, (u) => { const el = document.getElementById('adminUserEmail'); if (el && u) el.innerText = u.email || u.uid.slice(0,8); });
+
+        // Exportar CSV do extrato de entregas
+        window._lastReportOrders = [];
+        window.exportDeliveryCSV = () => {
+            const orders = window._lastReportOrders;
+            if (!orders.length) return showToast('Nenhum dado para exportar. Aplique um filtro primeiro.');
+            const rows = [['Data', 'Hora', 'Pedido', 'Cliente', 'Bairro', 'Pagamento', 'Taxa', 'Total']];
+            orders.forEach(o => {
+                const d = new Date(o.timestamp);
+                rows.push([
+                    d.toLocaleDateString('pt-BR'),
+                    String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'),
+                    '#' + (o.id || '').slice(-4).toUpperCase(),
+                    o.customer?.name || '',
+                    o.customer?.neighborhood || '',
+                    o.payment || '',
+                    safeNum(o.fee).toFixed(2),
+                    safeNum(o.total).toFixed(2)
+                ]);
+            });
+            // Sanitização anti-CSV-injection: Excel/LibreOffice interpretam células iniciadas
+            // em =, +, -, @, TAB ou CR como fórmula. Prefixa com aspa simples para neutralizar.
+            const sanitizeCsvCell = (v) => {
+                let s = String(v ?? '');
+                if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+                return s.replace(/"/g, '""');
+            };
+            // CRLF + BOM UTF-8 — padrão RFC 4180 e abre com acentos corretos no Excel
+            const csv = rows.map(r => r.map(v => `"${sanitizeCsvCell(v)}"`).join(',')).join('\r\n');
+            const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = `extrato_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        // Filtro em tempo real na tabela de entregas
+        window.filterDeliveryTable = () => {
+            const term = (document.getElementById('deliverySearch')?.value || '').toLowerCase();
+            document.querySelectorAll('#deliveryTableBody tr').forEach(tr => {
+                const text = tr.textContent.toLowerCase();
+                tr.style.display = term && !text.includes(term) ? 'none' : '';
+            });
+        };
+    </script>
+</body>
+</html>
