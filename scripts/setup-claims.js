@@ -16,10 +16,15 @@
 //  Idempotente: rodar de novo só sobrescreve o claim.
 // =================================================================
 
-const admin = require('firebase-admin');
-const serviceAccount = require('./serviceAccountKey.json');
+// API modular (firebase-admin v12+). A API namespaced (admin.credential.cert)
+// foi descontinuada e quebra em algumas combinações com Node 22+.
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const path = require('path');
 
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
+
+initializeApp({ credential: cert(serviceAccount) });
 
 // Edite esta lista com os emails atuais e o papel de cada um.
 // roles válidos: 'owner' | 'manager' | 'cashier'
@@ -30,15 +35,16 @@ const USERS = [
 ];
 
 (async () => {
+    const auth = getAuth();
     for (const u of USERS) {
         try {
-            const user = await admin.auth().getUserByEmail(u.email);
-            await admin.auth().setCustomUserClaims(user.uid, {
+            const user = await auth.getUserByEmail(u.email);
+            await auth.setCustomUserClaims(user.uid, {
                 tenantId: u.tenantId,
                 role: u.role
             });
             // Forçar refresh do token na próxima requisição (revoga sessão atual).
-            await admin.auth().revokeRefreshTokens(user.uid);
+            await auth.revokeRefreshTokens(user.uid);
             console.log(`OK  ${u.email}  ->  tenant=${u.tenantId} role=${u.role}`);
         } catch (e) {
             console.error(`ERR ${u.email}: ${e.message}`);
