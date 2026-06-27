@@ -7,6 +7,26 @@
     <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
+    <!--
+        Content Security Policy: trava XSS e supply-chain dos CDNs.
+        Allowlist enxuta — só as origens realmente usadas pelo painel.
+        'unsafe-inline' está presente porque Tailwind injeta CSS inline e há scripts inline (módulos ES6 + handlers onclick).
+        Em produção endurecida: trocar Tailwind CDN por build local e usar nonces nos scripts.
+        wss://localhost para o QZ Tray; ws://localhost mantido como fallback (algumas instalações antigas).
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.gstatic.com;
+        style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;
+        font-src 'self' data: https://cdnjs.cloudflare.com;
+        img-src 'self' data: https: blob:;
+        media-src 'self' https://cdn.freesound.org;
+        connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebasedatabase.app https://firestore.googleapis.com wss://*.firebaseio.com wss://localhost:* ws://localhost:* https://localhost:* http://localhost:*;
+        frame-src 'none';
+        object-src 'none';
+        base-uri 'self';
+        form-action 'self';
+    ">
     <link rel="icon" id="faviconEl" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23FFD700'/%3E%3Ctext x='50%25' y='55%25' text-anchor='middle' font-size='40' font-weight='900' fill='%230a0a0a' font-family='Arial'%3EB%3C/text%3E%3C/svg%3E">
     <title>Painel Brava | Admin</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -427,9 +447,6 @@
 
                 <div class="bg-white p-6 rounded-lg shadow space-y-4">
                     <h3 class="font-bold border-b pb-2">Horário de Funcionamento</h3>
-                    <div class="flex gap-4">
-                        <div><label class="text-xs font-bold text-gray-500">Abre (h)</label><input type="number" id="admOpen" min="0" max="23" class="border p-2 w-20 rounded text-center"></div>
-                        <div><label class="text-xs font-bold text-gray-500">Fecha (h)</label><input type="number" id="admClose" min="0" max="23" class="border p-2 w-20 rounded text-center"></div>
                     <div class="flex gap-4 items-end flex-wrap">
                         <div>
                             <label class="text-xs font-bold text-gray-500">Abre</label>
@@ -701,7 +718,19 @@
             btn.disabled = true; btn.innerText = "ENTRANDO...";
             signInWithEmailAndPassword(auth, email, pass)
                 .catch((e) => {
-                    errEl.innerText = "E-mail ou senha incorretos.";
+                    // Mensagens específicas pros casos comuns — antes, qualquer erro virava "credencial inválida"
+                    // e o dono trocava a senha sem motivo quando o problema era rede.
+                    const code = (e && e.code) || '';
+                    const map = {
+                        'auth/invalid-credential':     'E-mail ou senha incorretos.',
+                        'auth/invalid-email':          'E-mail inválido.',
+                        'auth/user-not-found':         'E-mail ou senha incorretos.',
+                        'auth/wrong-password':         'E-mail ou senha incorretos.',
+                        'auth/too-many-requests':      'Muitas tentativas. Aguarde alguns minutos.',
+                        'auth/network-request-failed': 'Sem conexão. Verifique sua internet.',
+                        'auth/user-disabled':          'Conta desativada. Fale com o suporte.'
+                    };
+                    errEl.innerText = map[code] || 'Falha ao entrar. Tente novamente.';
                     errEl.classList.remove('hidden');
                 })
                 .finally(() => { btn.disabled = false; btn.innerText = "ENTRAR"; });
@@ -724,8 +753,25 @@
 
         window.logout = () => signOut(auth);
 
+        // Debounce do refresh do relatório: snapshot dispara muito em hora de pico —
+        // sem isso, cada update vira um getDocs(2000) + 3 redraws de Chart.js.
+        let _reportRefreshTimer = null;
+        function scheduleReportRefresh() {
+            if (document.getElementById('tab-reports').classList.contains('hidden')) return;
+            clearTimeout(_reportRefreshTimer);
+            _reportRefreshTimer = setTimeout(() => applyReportFilter(), 1500);
+        }
+
         function initDashboard() {
-            const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'orders'), orderBy('timestamp', 'desc'), limit(500));
+            // Filtra "hoje" já no Firestore. Antes, o limit(500) global podia engolir
+            // os pedidos do dia em loja movimentada (pedidos antigos ocupavam as 500 vagas).
+            const startOfToday = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); })();
+            const q = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'orders'),
+                where('timestamp', '>=', startOfToday),
+                orderBy('timestamp', 'desc'),
+                limit(500)
+            );
             onSnapshot(q, (snap) => {
                 const todayStr = new Date().toLocaleDateString('pt-BR');
                 window.allOrdersCache = snap.docs.map(d => ({id: d.id, ...d.data()}));
@@ -738,11 +784,12 @@
 
                 snap.docs.forEach(d => {
                     const o = d.data();
+                    // Defesa contra docs malformados — um pedido inválido não pode quebrar o render dos outros.
+                    if (!o || !o.customer || !Array.isArray(o.items)) return;
                     const orderDate = new Date(o.timestamp).toLocaleDateString('pt-BR');
                     if (orderDate !== todayStr) return;
 
-                    if (!window._orderMap) window._orderMap = {};
-                window._orderMap[d.id] = {...o, id: d.id};
+                    window._orderMap[d.id] = { ...o, id: d.id };
                     
                     if (o.status === 'concluido' || o.status === 'cancelado') {
                         const isCanceled = o.status === 'cancelado';
@@ -808,7 +855,7 @@
                 document.getElementById('pendingCount').innerText = pendingCount;
                 document.getElementById('pendingCount').classList.toggle('hidden', pendingCount === 0);
                 if(pendingCount > 0 && soundEnabled) { playAlert(); } else { stopAlert(); }
-                if(!document.getElementById('tab-reports').classList.contains('hidden')) applyReportFilter();
+                scheduleReportRefresh();
             }, (err) => updateOnlineStatus(err));
 
             getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories')).then(s => { if(s.exists()){ window.categories = s.data().items; renderCategories(); updateCategoryFilterOptions(); } }).catch(e => console.warn('Categorias:', e)).finally(() => {
@@ -869,8 +916,12 @@
                 );
                 const snap = await getDocs(rq);
                 const filtered = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                const truncated = filtered.length >= 2000;
                 document.getElementById('statPeriodLabel').innerText =
-                    filtered.length === 2000 ? label + ' (limite 2000)' : label;
+                    truncated ? label + ' (truncado em 2000)' : label;
+                if (truncated) {
+                    showToast('Relatório truncado em 2000 pedidos — refine o período pra ver tudo.', 'info');
+                }
                 calculateReports(filtered);
             } catch (e) {
                 document.getElementById('statPeriodLabel').innerText = label;
@@ -923,6 +974,7 @@
             };
             let tableHtml = '';
             orders.forEach(o => {
+                if (!o) return; // doc malformado não derruba a tabela
                 const isCanceled = o.status === 'cancelado';
                 const d = new Date(o.timestamp);
                 const timeStr = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
@@ -1282,19 +1334,24 @@
             legacyPrintOrder(o);
         };
 
-        window.editProduct = (id) => { 
+        // Gera <option>s do select de categorias com escape — evita XSS authenticated
+        const renderCatOptions = () => window.categories
+            .map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`)
+            .join('');
+
+        window.editProduct = (id) => {
             const p = window.products.find(x => x.id === id);
             if (!p) return;
-            document.getElementById('editId').value = id; 
-            document.getElementById('editName').value = p.name; 
-            document.getElementById('editPrice').value = p.price; 
-            document.getElementById('editImg').value = p.img; 
-            document.getElementById('editDesc').value = p.desc || ''; 
-            document.getElementById('editActive').checked = p.active !== false; 
-            document.getElementById('editCat').innerHTML = window.categories.map(c => `<option value="${c.id}">${c.name}</option>`).join(''); 
-            document.getElementById('editCat').value = p.cat; 
-            document.getElementById('btnDel').classList.remove('hidden'); 
-            document.getElementById('prodModal').classList.remove('hidden'); 
+            document.getElementById('editId').value = id;
+            document.getElementById('editName').value = p.name;
+            document.getElementById('editPrice').value = p.price;
+            document.getElementById('editImg').value = p.img;
+            document.getElementById('editDesc').value = p.desc || '';
+            document.getElementById('editActive').checked = p.active !== false;
+            document.getElementById('editCat').innerHTML = renderCatOptions();
+            document.getElementById('editCat').value = p.cat;
+            document.getElementById('btnDel').classList.remove('hidden');
+            document.getElementById('prodModal').classList.remove('hidden');
         };
 
         window.saveProduct = async () => { 
@@ -1329,14 +1386,14 @@
         };
 
         window.deleteProduct = async () => { if(confirm("Excluir?")) { try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'products', document.getElementById('editId').value)); document.getElementById('prodModal').classList.add('hidden'); } catch (e) { showToast("Erro ao excluir: " + e.message); } } };
-        window.openProductModal = () => { 
-            document.getElementById('editId').value = ''; 
-            document.getElementById('editName').value = ''; 
-            document.getElementById('editPrice').value = ''; 
-            document.getElementById('editImg').value = ''; 
-            document.getElementById('editDesc').value = ''; 
-            document.getElementById('editCat').innerHTML = window.categories.map(c => `<option value="${c.id}">${c.name}</option>`).join(''); 
-            document.getElementById('prodModal').classList.remove('hidden'); 
+        window.openProductModal = () => {
+            document.getElementById('editId').value = '';
+            document.getElementById('editName').value = '';
+            document.getElementById('editPrice').value = '';
+            document.getElementById('editImg').value = '';
+            document.getElementById('editDesc').value = '';
+            document.getElementById('editCat').innerHTML = renderCatOptions();
+            document.getElementById('prodModal').classList.remove('hidden');
             document.getElementById('editName').focus();
         };
         window.closeModal = () => document.getElementById('prodModal').classList.add('hidden');
@@ -1349,19 +1406,57 @@
             let count = 0;
             const errors = [];
             raw.forEach((line, i) => {
-                const [name, price, cat, img, desc] = line.split(';').map(s => s.trim());
-                if (!name || !price) return;
+                if (!line.trim()) return; // linha em branco: ignora sem reportar
+                const [name, price, cat, img, desc] = line.split(';').map(s => (s || '').trim());
+                if (!name)                                      { errors.push(`Linha ${i+1}: nome vazio`); return; }
+                if (name.length > 120)                          { errors.push(`Linha ${i+1}: nome > 120 caracteres`); return; }
+                if (!price)                                     { errors.push(`Linha ${i+1}: preço vazio`); return; }
                 const parsedPrice = parseFloat(String(price).replace(',','.'));
-                if (!name || name.length > 120) { errors.push(`Linha ${i+1}: nome inválido`); return; }
-                if (isNaN(parsedPrice) || parsedPrice < 0 || parsedPrice > 99999) { errors.push(`Linha ${i+1}: preço inválido ("${price}")`); return; }
-                batch.set(doc(col), { name: name.slice(0,120), price: parsedPrice, cat: (cat||'outros').slice(0,40), img: (img||'📦').slice(0,200), desc: (desc||'').slice(0,200), active: true });
+                if (isNaN(parsedPrice) || parsedPrice < 0 || parsedPrice > 99999) {
+                    errors.push(`Linha ${i+1}: preço inválido ("${price}")`);
+                    return;
+                }
+                batch.set(doc(col), {
+                    name: name.slice(0,120),
+                    price: parsedPrice,
+                    cat: (cat || 'outros').slice(0,40),
+                    img: (img || '📦').slice(0,200),
+                    desc: (desc || '').slice(0,200),
+                    active: true
+                });
                 count++;
             });
             if (errors.length) { showToast('Erros encontrados: ' + errors.join('; ')); return; }
-            try { await batch.commit(); showToast(`${count} produto(s) importado(s)!`, 'success'); document.getElementById('bulkModal').classList.add('hidden'); } catch (e) { showToast('Erro ao importar: ' + e.message); }
+            try {
+                await batch.commit();
+                showToast(`${count} produto(s) importado(s)!`, 'success');
+                document.getElementById('bulkModal').classList.add('hidden');
+            } catch (e) {
+                showToast('Erro ao importar: ' + e.message);
+            }
         };
         window.renderCategories = () => { document.getElementById('categoriesListAdmin').innerHTML = window.categories.map((c, i) => `<div class="bg-white p-3 rounded flex justify-between border items-center font-bold"><span>${escapeHtml(c.name)}</span><button onclick="remCat(${i})" class="text-red-500">&times;</button></div>`).join(''); };
-        window.addCategory = async () => { const name = document.getElementById('newCatName').value; if(!name) return; window.categories.push({ id: name.toLowerCase().replace(/\s/g, '_'), name }); try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), { items: window.categories }); renderCategories(); updateCategoryFilterOptions(); document.getElementById('newCatName').value = ''; } catch (e) { window.categories.pop(); showToast("Erro ao adicionar categoria: " + e.message); } };
+        window.addCategory = async () => {
+            const raw = (document.getElementById('newCatName').value || '').trim();
+            if (!raw) return;
+            // ID determinístico: sem acentos, sem espaços, só alfanumérico + underscore
+            const id = raw.toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            if (!id) { showToast('Nome de categoria inválido.'); return; }
+            if (window.categories.some(c => c.id === id)) { showToast('Já existe uma categoria com esse nome.'); return; }
+            window.categories.push({ id, name: raw });
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), { items: window.categories });
+                renderCategories();
+                updateCategoryFilterOptions();
+                document.getElementById('newCatName').value = '';
+            } catch (e) {
+                window.categories.pop();
+                showToast("Erro ao adicionar categoria: " + e.message);
+            }
+        };
         window.remCat = async (i) => {
             const cat = window.categories[i];
             const inUse = window.products.filter(p => p.cat === cat.id).length;
@@ -1433,8 +1528,12 @@
             // WhatsApp: auto-prefixar 55 se for número BR sem DDI
             let whatsapp = document.getElementById('shopWhatsapp').value.trim().replace(/\D/g, '');
             if (whatsapp.length === 10 || whatsapp.length === 11) whatsapp = '55' + whatsapp;
-            if (whatsapp && !(whatsapp.length === 12 || whatsapp.length === 13) || (whatsapp && !whatsapp.startsWith('55'))) {
-                return showToast(`WhatsApp inválido: "${whatsapp}". Deve ter 12 ou 13 dígitos iniciando com 55 (DDI Brasil). Ex: 5547999999999`);
+            if (whatsapp) {
+                const lenOk    = (whatsapp.length === 12 || whatsapp.length === 13);
+                const prefixOk = whatsapp.startsWith('55');
+                if (!lenOk || !prefixOk) {
+                    return showToast(`WhatsApp inválido: "${whatsapp}". Deve ter 12 ou 13 dígitos iniciando com 55 (DDI Brasil). Ex: 5547999999999`);
+                }
             }
 
             // Cor: sincronizar hex digitado com color picker
@@ -1544,8 +1643,16 @@
                     safeNum(o.total).toFixed(2)
                 ]);
             });
-            const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            // Sanitização anti-CSV-injection: Excel/LibreOffice interpretam células iniciadas
+            // em =, +, -, @, TAB ou CR como fórmula. Prefixa com aspa simples para neutralizar.
+            const sanitizeCsvCell = (v) => {
+                let s = String(v ?? '');
+                if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+                return s.replace(/"/g, '""');
+            };
+            // CRLF + BOM UTF-8 — padrão RFC 4180 e abre com acentos corretos no Excel
+            const csv = rows.map(r => r.map(v => `"${sanitizeCsvCell(v)}"`).join(',')).join('\r\n');
+            const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a'); a.href = url; a.download = `extrato_${new Date().toISOString().slice(0,10)}.csv`; a.click();
             URL.revokeObjectURL(url);
